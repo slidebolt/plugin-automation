@@ -36,7 +36,9 @@ func (p *AutomationPlugin) Init(b sdk.Bundle) error {
 	return nil
 }
 
-func NewPlugin() sdk.Plugin {
+func (p *AutomationPlugin) Shutdown() {}
+
+func NewPlugin() *AutomationPlugin {
 	return &AutomationPlugin{}
 }
 

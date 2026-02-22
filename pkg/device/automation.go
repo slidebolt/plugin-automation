@@ -32,7 +32,7 @@ func CreateGroup(b sdk.Bundle, name string, sid string, members []string) (sdk.D
 		end
 
 		local function publishEntityState(ctx, status, raw, payload)
-			local statePayload = { power = status }
+			local statePayload = { power = (status == "on") }
 			statePayload.brightness = (raw and raw.brightness) or 100
 			if raw and raw.color_rgb then
 				statePayload.r = raw.color_rgb.r
@@ -45,7 +45,7 @@ func CreateGroup(b sdk.Bundle, name string, sid string, members []string) (sdk.D
 			if payload and payload.scene then
 				statePayload.scene = payload.scene
 			end
-			ctx.Publish("entity." .. ctx.ID .. ".state", statePayload)
+			ctx.UpdateProperties(statePayload)
 		end
 
 		function onCommand(cmd, payload, ctx)
@@ -111,7 +111,7 @@ func CreateLightGroup(b sdk.Bundle, name string, sid string, members []string) (
 		end
 
 		local function publishEntityState(ctx, status, raw, payload)
-			local statePayload = { power = status }
+			local statePayload = { power = (status == "on") }
 			statePayload.brightness = (raw and raw.brightness) or 100
 			if raw and raw.color_rgb then
 				statePayload.r = raw.color_rgb.r
@@ -124,7 +124,7 @@ func CreateLightGroup(b sdk.Bundle, name string, sid string, members []string) (
 			if payload and payload.scene then
 				statePayload.scene = payload.scene
 			end
-			ctx.Publish("entity." .. ctx.ID .. ".state", statePayload)
+			ctx.UpdateProperties(statePayload)
 		end
 
 		function onCommand(cmd, payload, ctx)

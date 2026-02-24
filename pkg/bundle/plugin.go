@@ -1,7 +1,6 @@
 package bundle
 
 import (
-	"fmt"
 	 "github.com/slidebolt/plugin-automation/pkg/device"
 	"github.com/slidebolt/plugin-sdk"
 	"strings"
@@ -43,45 +42,95 @@ func NewPlugin() *AutomationPlugin {
 }
 
 func ensureAutomationControl(b sdk.Bundle) (sdk.Device, sdk.Entity, error) {
-	var ctrl sdk.Device
+	raw := b.Raw()
+	if raw == nil {
+		raw = make(map[string]interface{})
+	}
 
-	if obj, ok := b.GetBySourceID(sdk.SourceID("automation-control")); ok {
-		switch v := obj.(type) {
-		case sdk.Device:
-			ctrl = v
-		case sdk.Entity:
-			dev, err := b.GetDevice(v.DeviceID())
-			if err == nil {
-				ctrl = dev
+	devID := sdk.UUID(asString(raw["control_device_uuid"]))
+	entID := sdk.UUID(asString(raw["control_entity_uuid"]))
+
+	var ctrl sdk.Device
+	var ent sdk.Entity
+
+	// 1. Try UUID lookup from config
+	if devID != "" {
+		if d, err := b.GetDevice(devID); err == nil {
+			ctrl = d
+		}
+	}
+
+	if entID != "" && ctrl != nil {
+		ents, _ := ctrl.GetEntities()
+		for _, e := range ents {
+			if e.ID() == entID {
+				ent = e
+				break
 			}
 		}
 	}
 
+	// 2. Fallback to SourceID (new unique names)
 	if ctrl == nil {
-		created, err := device.CreateVirtualDevice(b, "Automation Control", "automation-control")
+		if obj, ok := b.GetBySourceID(sdk.SourceID("automation-control-device")); ok {
+			if d, ok := obj.(sdk.Device); ok {
+				ctrl = d
+			}
+		}
+	}
+
+	if ent == nil && ctrl != nil {
+		if obj, ok := ctrl.GetBySourceID(sdk.SourceID("automation-control-switch")); ok {
+			if e, ok := obj.(sdk.Entity); ok {
+				ent = e
+			}
+		}
+	}
+
+	// 3. Migration fallback (old ambiguous name)
+	if ctrl == nil {
+		if obj, ok := b.GetBySourceID(sdk.SourceID("automation-control")); ok {
+			if d, ok := obj.(sdk.Device); ok {
+				ctrl = d
+			}
+		}
+	}
+
+	// 4. Create if still missing
+	if ctrl == nil {
+		created, err := device.CreateVirtualDevice(b, "Automation Control", "automation-control-device")
 		if err != nil {
 			return nil, nil, err
 		}
 		ctrl = created
 	}
-	_ = ctrl.UpdateMetadata("Automation Control", sdk.SourceID("automation-control"))
 
-	var ent sdk.Entity
-	if obj, ok := ctrl.GetBySourceID(sdk.SourceID("automation-control")); ok {
-		if existing, ok := obj.(sdk.Entity); ok {
-			ent = existing
-		}
-	}
 	if ent == nil {
-		created, err := ctrl.CreateEntity(sdk.TYPE_SWITCH)
-		if err != nil {
-			return nil, nil, err
+		// Try finding by old SourceID within the device
+		if obj, ok := ctrl.GetBySourceID(sdk.SourceID("automation-control")); ok {
+			if e, ok := obj.(sdk.Entity); ok {
+				ent = e
+			}
 		}
-		ent = created
+
+		if ent == nil {
+			created, err := ctrl.CreateEntity(sdk.TYPE_SWITCH)
+			if err != nil {
+				return nil, nil, err
+			}
+			ent = created
+		}
 	}
-	if err := ent.UpdateMetadata("Automation Control", sdk.SourceID("automation-control")); err != nil {
-		return nil, nil, fmt.Errorf("update control metadata: %w", err)
-	}
+
+	// Ensure metadata is set to the NEW unique SourceIDs
+	_ = ctrl.UpdateMetadata("Automation Control", sdk.SourceID("automation-control-device"))
+	_ = ent.UpdateMetadata("Automation Control", sdk.SourceID("automation-control-switch"))
+
+	// 6. Persist UUIDs
+	raw["control_device_uuid"] = string(ctrl.ID())
+	raw["control_entity_uuid"] = string(ent.ID())
+	b.UpdateRaw(raw)
+
 	return ctrl, ent, nil
 }
 

@@ -3,8 +3,9 @@ module github.com/slidebolt/plugin-automation
 go 1.25.7
 
 require (
-	github.com/slidebolt/sdk-runner v0.0.3
-	github.com/slidebolt/sdk-types v0.0.1
+	github.com/slidebolt/sdk-entities v0.0.4
+	github.com/slidebolt/sdk-runner v0.0.5
+	github.com/slidebolt/sdk-types v0.0.4
 )
 
 require (

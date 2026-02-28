@@ -28,7 +28,6 @@ func (p *PluginAutomationPlugin) OnStorageUpdate(current types.Storage) (types.S
 }
 
 func (p *PluginAutomationPlugin) OnDeviceCreate(dev types.Device) (types.Device, error) {
-	dev.Config = types.Storage{Meta: "plugin-automation-metadata"}
 	return dev, nil
 }
 func (p *PluginAutomationPlugin) OnDeviceUpdate(dev types.Device) (types.Device, error) { return dev, nil }

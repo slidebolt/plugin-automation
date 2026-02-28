@@ -49,37 +49,35 @@ func (p *PluginAutomationPlugin) OnEntitiesList(d string, c []types.Entity) ([]t
 
 func (p *PluginAutomationPlugin) OnCommand(cmd types.Command, entity types.Entity) (types.Entity, error) {
 	parsed, err := entityswitch.ParseCommand(cmd)
-	if err != nil {
-		return entity, err
-	}
+	if err == nil {
+		power := false
+		switch parsed.Type {
+		case entityswitch.ActionTurnOn:
+			power = true
+		case entityswitch.ActionTurnOff:
+			power = false
+		default:
+			return entity, fmt.Errorf("unsupported switch action: %s", parsed.Type)
+		}
 
-	power := false
-	switch parsed.Type {
-	case entityswitch.ActionTurnOn:
-		power = true
-	case entityswitch.ActionTurnOff:
-		power = false
-	default:
-		return entity, fmt.Errorf("unsupported switch action: %s", parsed.Type)
-	}
+		stateData, _ := json.Marshal(map[string]any{"power": power})
+		entity.Data.Reported = stateData
+		entity.Data.Effective = stateData
+		entity.Data.SyncStatus = "in_sync"
+		entity.Data.UpdatedAt = time.Now().UTC()
 
-	stateData, _ := json.Marshal(map[string]any{"power": power})
-	entity.Data.Reported = stateData
-	entity.Data.Effective = stateData
-	entity.Data.SyncStatus = "in_sync"
-	entity.Data.UpdatedAt = time.Now().UTC()
-
-	if p.sink != nil {
-		go func() {
-			// Small delay to simulate async
-			time.Sleep(50 * time.Millisecond)
-			p.sink.EmitEvent(types.InboundEvent{
-				DeviceID:      entity.DeviceID,
-				EntityID:      entity.ID,
-				CorrelationID: cmd.ID,
-				Payload:       stateData,
-			})
-		}()
+		if p.sink != nil {
+			go func() {
+				// Small delay to simulate async
+				time.Sleep(50 * time.Millisecond)
+				p.sink.EmitEvent(types.InboundEvent{
+					DeviceID:      entity.DeviceID,
+					EntityID:      entity.ID,
+					CorrelationID: cmd.ID,
+					Payload:       stateData,
+				})
+			}()
+		}
 	}
 
 	return entity, nil

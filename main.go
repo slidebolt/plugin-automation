@@ -21,6 +21,7 @@ func (p *PluginAutomationPlugin) OnInitialize(config runner.Config, state types.
 }
 
 func (p *PluginAutomationPlugin) OnReady()                       {}
+func (p *PluginAutomationPlugin) OnShutdown()                    {}
 func (p *PluginAutomationPlugin) OnHealthCheck() (string, error) { return "perfect", nil }
 func (p *PluginAutomationPlugin) OnStorageUpdate(current types.Storage) (types.Storage, error) {
 	return current, nil

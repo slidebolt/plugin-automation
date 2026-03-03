@@ -69,7 +69,11 @@ func (p *PluginAutomationPlugin) OnEventTyped(evt types.EventTyped[types.Generic
 }
 
 func main() {
-	if err := runner.NewRunner(&PluginAutomationPlugin{}).Run(); err != nil {
+	r, err := runner.NewRunner(&PluginAutomationPlugin{})
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := r.Run(); err != nil {
 		log.Fatal(err)
 	}
 }

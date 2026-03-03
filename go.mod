@@ -3,9 +3,9 @@ module github.com/slidebolt/plugin-automation
 go 1.25.7
 
 require (
-	github.com/slidebolt/sdk-entities v1.1.0
-	github.com/slidebolt/sdk-runner v1.2.1
-	github.com/slidebolt/sdk-types v1.1.0
+	github.com/slidebolt/sdk-entities v1.4.1
+	github.com/slidebolt/sdk-runner v1.6.1
+	github.com/slidebolt/sdk-types v1.5.3
 )
 
 require (
@@ -17,4 +17,3 @@ require (
 	golang.org/x/crypto v0.48.0 // indirect
 	golang.org/x/sys v0.41.0 // indirect
 )
-

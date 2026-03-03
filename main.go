@@ -16,7 +16,7 @@ type PluginAutomationPlugin struct {
 
 func (p *PluginAutomationPlugin) OnInitialize(config runner.Config, state types.Storage) (types.Manifest, types.Storage) {
 	p.sink = config.EventSink
-	return types.Manifest{ID: "plugin-automation", Name: "Plugin Automation", Version: "1.0.0"}, state
+	return types.Manifest{ID: "plugin-automation", Name: "Plugin Automation", Version: "1.0.0", Schemas: types.CoreDomains()}, state
 }
 
 func (p *PluginAutomationPlugin) OnReady() {}
@@ -38,7 +38,7 @@ func (p *PluginAutomationPlugin) OnDeviceUpdate(dev types.Device) (types.Device,
 }
 func (p *PluginAutomationPlugin) OnDeviceDelete(id string) error { return nil }
 func (p *PluginAutomationPlugin) OnDevicesList(current []types.Device) ([]types.Device, error) {
-	return current, nil
+	return runner.EnsureCoreDevice("plugin-automation", current), nil
 }
 func (p *PluginAutomationPlugin) OnDeviceSearch(q types.SearchQuery, res []types.Device) ([]types.Device, error) {
 	return res, nil
@@ -48,15 +48,15 @@ func (p *PluginAutomationPlugin) OnEntityCreate(e types.Entity) (types.Entity, e
 func (p *PluginAutomationPlugin) OnEntityUpdate(e types.Entity) (types.Entity, error) { return e, nil }
 func (p *PluginAutomationPlugin) OnEntityDelete(d, e string) error                    { return nil }
 func (p *PluginAutomationPlugin) OnEntitiesList(d string, c []types.Entity) ([]types.Entity, error) {
-	return c, nil
+	return runner.EnsureCoreEntities("plugin-automation", d, c), nil
 }
 
-func (p *PluginAutomationPlugin) OnCommandTyped(req types.CommandRequest[types.GenericPayload], entity types.Entity) (types.Entity, error) {
+func (p *PluginAutomationPlugin) OnCommand(req types.Command, entity types.Entity) (types.Entity, error) {
 	// Automation plugin: commands are handled by Lua scripts, not the plugin itself.
 	return entity, nil
 }
 
-func (p *PluginAutomationPlugin) OnEventTyped(evt types.EventTyped[types.GenericPayload], entity types.Entity) (types.Entity, error) {
+func (p *PluginAutomationPlugin) OnEvent(evt types.Event, entity types.Entity) (types.Entity, error) {
 	raw, err := json.Marshal(evt.Payload)
 	if err != nil {
 		return entity, err

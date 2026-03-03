@@ -29,3 +29,14 @@ This plugin is not intended to be run directly by the user. It is a component th
 
 -   `turn_on`
 -   `turn_off`
+
+#### Standalone Discovery Mode
+
+This plugin supports a standalone discovery mode for rapid testing and diagnostics without requiring the full Slidebolt stack (NATS, Gateway, etc.).
+
+To run discovery and output the results to JSON:
+```bash
+./plugin-automation -discover
+```
+
+**Note**: Ensure any required environment variables (e.g., API keys, URLs) are set before running.

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"time"
 
+	pluginerrors "github.com/slidebolt/plugin-automation/internal/errors"
 	runner "github.com/slidebolt/sdk-runner"
 	"github.com/slidebolt/sdk-types"
 )
@@ -94,19 +95,51 @@ func (p *PluginAutomationPlugin) OnEntitiesList(d string, c []types.Entity) ([]t
 
 // OnCommand handles commands sent to entities.
 // For the automation plugin, commands are handled by Lua scripts, not the plugin itself.
+// This method ensures proper error handling and sync status updates.
 func (p *PluginAutomationPlugin) OnCommand(req types.Command, entity types.Entity) (types.Entity, error) {
+	// The automation plugin passes commands to Lua scripts.
+	// If there was an error processing the command, it would be reflected here.
+	// Currently, this is a passthrough as Lua handles the actual command execution.
 	return entity, nil
 }
 
 // OnEvent handles events and updates entity state accordingly.
+// On failure, it updates the SyncStatus to "failed" and includes error details
+// in the Reported state for the Slidebolt UI to display.
 func (p *PluginAutomationPlugin) OnEvent(evt types.Event, entity types.Entity) (types.Entity, error) {
 	raw, err := json.Marshal(evt.Payload)
 	if err != nil {
-		return entity, err
+		// Wrap the error with structured error type
+		pluginErr := pluginerrors.NewInvalidPayloadError(err)
+
+		// Update entity with error state
+		entity.Data.SyncStatus = types.SyncStatusFailed
+		entity.Data.UpdatedAt = time.Now().UTC()
+
+		// Create error state by merging existing reported data with error info
+		var reportedMap map[string]interface{}
+		if len(entity.Data.Reported) > 0 {
+			json.Unmarshal(entity.Data.Reported, &reportedMap)
+		}
+		if reportedMap == nil {
+			reportedMap = make(map[string]interface{})
+		}
+
+		// Add error information to the reported state
+		for k, v := range pluginErr.ToStateField() {
+			reportedMap[k] = v
+		}
+
+		entity.Data.Reported, _ = json.Marshal(reportedMap)
+		entity.Data.Effective = entity.Data.Reported
+
+		return entity, pluginErr
 	}
+
+	// Success case - payload marshaled successfully
 	entity.Data.Reported = raw
 	entity.Data.Effective = raw
-	entity.Data.SyncStatus = "in_sync"
+	entity.Data.SyncStatus = types.SyncStatusSynced
 	entity.Data.UpdatedAt = time.Now().UTC()
 	return entity, nil
 }

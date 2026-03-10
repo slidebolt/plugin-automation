@@ -76,11 +76,11 @@ func TestPluginAutomationPlugin_OnHealthCheck(t *testing.T) {
 	}
 }
 
-func TestPluginAutomationPlugin_OnDevicesList(t *testing.T) {
+func TestPluginAutomationPlugin_OnDeviceDiscover(t *testing.T) {
 	plugin := &PluginAutomationPlugin{}
 
 	current := []types.Device{}
-	devices, err := plugin.OnDevicesList(current)
+	devices, err := plugin.OnDeviceDiscover(current)
 
 	if err != nil {
 		t.Errorf("expected no error, got %v", err)
@@ -93,7 +93,7 @@ func TestPluginAutomationPlugin_OnDevicesList(t *testing.T) {
 	// Test that existing devices are preserved
 	existingDev := types.Device{ID: "existing-device", SourceID: "other-source"}
 	current = []types.Device{existingDev}
-	devices, err = plugin.OnDevicesList(current)
+	devices, err = plugin.OnDeviceDiscover(current)
 
 	if err != nil {
 		t.Errorf("expected no error, got %v", err)
@@ -115,13 +115,13 @@ func TestPluginAutomationPlugin_OnDevicesList(t *testing.T) {
 	}
 }
 
-func TestPluginAutomationPlugin_OnEntitiesList(t *testing.T) {
+func TestPluginAutomationPlugin_OnEntityDiscover(t *testing.T) {
 	plugin := &PluginAutomationPlugin{}
 
 	// Use the plugin ID as device ID, which is what EnsureCoreDevice/EnsureCoreEntities expects
 	deviceID := "plugin-automation"
 	current := []types.Entity{}
-	entities, err := plugin.OnEntitiesList(deviceID, current)
+	entities, err := plugin.OnEntityDiscover(deviceID, current)
 
 	if err != nil {
 		t.Errorf("expected no error, got %v", err)
@@ -210,7 +210,7 @@ func TestPluginAutomationPlugin_OnEvent_Success(t *testing.T) {
 	}
 }
 
-func TestPluginAutomationPlugin_OnStorageUpdate(t *testing.T) {
+func TestPluginAutomationPlugin_OnConfigUpdate(t *testing.T) {
 	plugin := &PluginAutomationPlugin{}
 
 	state := types.Storage{
@@ -218,7 +218,7 @@ func TestPluginAutomationPlugin_OnStorageUpdate(t *testing.T) {
 		Data: json.RawMessage(`{"key":"value"}`),
 	}
 
-	updatedState, err := plugin.OnStorageUpdate(state)
+	updatedState, err := plugin.OnConfigUpdate(state)
 	if err != nil {
 		t.Errorf("expected no error, got %v", err)
 	}

@@ -3,6 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	pluginerrors "github.com/slidebolt/plugin-automation/internal/errors"
@@ -13,12 +16,14 @@ import (
 // PluginAutomationPlugin implements the runner.Plugin interface for the automation plugin.
 // This plugin provides virtual switch capabilities within the Slidebolt ecosystem.
 type PluginAutomationPlugin struct {
-	sink runner.EventSink
+	sink   runner.EventSink
+	master runner.RegistryCache
 }
 
 // OnInitialize is called when the plugin is initialized by the runner.
 func (p *PluginAutomationPlugin) OnInitialize(config runner.Config, state types.Storage) (types.Manifest, types.Storage) {
 	p.sink = config.EventSink
+	p.master = config.RegistryCache
 	return types.Manifest{
 		ID:      "plugin-automation",
 		Name:    "Plugin Automation",
@@ -43,8 +48,8 @@ func (p *PluginAutomationPlugin) OnHealthCheck() (string, error) {
 	return "perfect", nil
 }
 
-// OnStorageUpdate is called when the plugin's storage is updated.
-func (p *PluginAutomationPlugin) OnStorageUpdate(current types.Storage) (types.Storage, error) {
+// OnConfigUpdate is called when the plugin's storage is updated.
+func (p *PluginAutomationPlugin) OnConfigUpdate(current types.Storage) (types.Storage, error) {
 	return current, nil
 }
 
@@ -63,8 +68,8 @@ func (p *PluginAutomationPlugin) OnDeviceDelete(id string) error {
 	return nil
 }
 
-// OnDevicesList is called to list all devices managed by this plugin.
-func (p *PluginAutomationPlugin) OnDevicesList(current []types.Device) ([]types.Device, error) {
+// OnDeviceDiscover is called to list all devices managed by this plugin.
+func (p *PluginAutomationPlugin) OnDeviceDiscover(current []types.Device) ([]types.Device, error) {
 	return runner.EnsureCoreDevice("plugin-automation", current), nil
 }
 
@@ -88,9 +93,113 @@ func (p *PluginAutomationPlugin) OnEntityDelete(d, e string) error {
 	return nil
 }
 
-// OnEntitiesList is called to list all entities for a device.
-func (p *PluginAutomationPlugin) OnEntitiesList(d string, c []types.Entity) ([]types.Entity, error) {
+// OnEntityDiscover is called to list all entities for a device.
+func (p *PluginAutomationPlugin) OnEntityDiscover(d string, c []types.Entity) ([]types.Entity, error) {
+	if d == "plugin-automation" && p.master != nil {
+		groups := p.buildAutoGroups()
+		c = append(c, groups...)
+	}
 	return runner.EnsureCoreEntities("plugin-automation", d, c), nil
+}
+
+func (p *PluginAutomationPlugin) buildAutoGroups() []types.Entity {
+	matches, err := p.master.FindEntities(types.SearchQuery{Pattern: "*"})
+	if err != nil {
+		return nil
+	}
+
+	type sample struct {
+		domain  string
+		actions []string
+	}
+	groupSamples := map[string]sample{}
+	for _, m := range matches {
+		vals := m.Labels["PluginAutomation"]
+		if len(vals) == 0 {
+			continue
+		}
+		// Do not include generated automation groups in the source set.
+		if m.PluginID == "plugin-automation" && m.DeviceID == "plugin-automation" {
+			continue
+		}
+		for _, g := range vals {
+			g = strings.TrimSpace(g)
+			if g == "" {
+				continue
+			}
+			if _, ok := groupSamples[g]; !ok {
+				groupSamples[g] = sample{
+					domain:  strings.TrimSpace(m.Domain),
+					actions: append([]string(nil), m.Actions...),
+				}
+			}
+		}
+	}
+
+	if len(groupSamples) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(groupSamples))
+	for name := range groupSamples {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	out := make([]types.Entity, 0, len(names))
+	for _, name := range names {
+		s := groupSamples[name]
+		domain := s.domain
+		if domain == "" {
+			domain = "switch"
+		}
+		actions := append([]string(nil), s.actions...)
+		if len(actions) == 0 {
+			actions = []string{"turn_on", "turn_off"}
+		}
+		query := fmt.Sprintf("?label=PluginAutomation:%s", name)
+		out = append(out, types.Entity{
+			ID:        "group-" + normalizeID(name),
+			DeviceID:  "plugin-automation",
+			Domain:    domain,
+			LocalName: name,
+			Actions:   actions,
+			Labels: map[string][]string{
+				"Group":                {name},
+				"virtual_source_query": {query},
+			},
+			Data: types.EntityData{
+				SyncStatus: types.SyncStatusSynced,
+				UpdatedAt:  time.Now().UTC(),
+			},
+		})
+	}
+	return out
+}
+
+func normalizeID(s string) string {
+	s = strings.TrimSpace(strings.ToLower(s))
+	if s == "" {
+		return "unnamed"
+	}
+	var b strings.Builder
+	prevDash := false
+	for _, r := range s {
+		ok := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
+		if ok {
+			b.WriteRune(r)
+			prevDash = false
+			continue
+		}
+		if !prevDash {
+			b.WriteByte('-')
+			prevDash = true
+		}
+	}
+	id := strings.Trim(b.String(), "-")
+	if id == "" {
+		return "unnamed"
+	}
+	return id
 }
 
 // OnCommand handles commands sent to entities.

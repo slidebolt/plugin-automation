@@ -2,253 +2,145 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"sort"
-	"strings"
+	"log/slog"
 	"time"
 
-	pluginerrors "github.com/slidebolt/plugin-automation/internal/errors"
 	runner "github.com/slidebolt/sdk-runner"
 	"github.com/slidebolt/sdk-types"
 )
 
-// PluginAutomationPlugin implements the runner.Plugin interface for the automation plugin.
-// This plugin provides virtual switch capabilities within the Slidebolt ecosystem.
+// PluginAutomationPlugin implements the runner.Plugin interface.
+// It manages two virtual devices (core management + automation groups) and keeps
+// group entities in sync with the registry via a background refresh loop.
 type PluginAutomationPlugin struct {
-	sink   runner.EventSink
-	master runner.RegistryCache
+	pctx   runner.PluginContext
+	logger *slog.Logger
+	stop   chan struct{}
+	done   chan struct{}
 }
 
-// OnInitialize is called when the plugin is initialized by the runner.
-func (p *PluginAutomationPlugin) OnInitialize(config runner.Config, state types.Storage) (types.Manifest, types.Storage) {
-	p.sink = config.EventSink
-	p.master = config.RegistryCache
+// Initialize registers the core and groups devices/entities, then runs the first
+// group sync. Called once before Start.
+func (p *PluginAutomationPlugin) Initialize(ctx runner.PluginContext) (types.Manifest, error) {
+	p.pctx = ctx
+	p.logger = ctx.Logger
+
+	if ctx.Registry == nil {
+		return types.Manifest{}, fmt.Errorf("registry unavailable")
+	}
+	if err := ctx.Registry.SaveDevice(coreDevice()); err != nil {
+		return types.Manifest{}, fmt.Errorf("upsert core device: %w", err)
+	}
+	for _, ent := range coreEntities() {
+		if err := ctx.Registry.SaveEntity(ent); err != nil {
+			return types.Manifest{}, fmt.Errorf("upsert core entity %s: %w", ent.ID, err)
+		}
+	}
+	if err := ctx.Registry.SaveDevice(groupsDevice()); err != nil {
+		return types.Manifest{}, fmt.Errorf("upsert groups device: %w", err)
+	}
+	if err := p.refreshGroups(); err != nil {
+		p.log().Warn("initialize: initial group refresh failed", "err", err)
+	}
+
 	return types.Manifest{
 		ID:      "plugin-automation",
 		Name:    "Plugin Automation",
 		Version: "1.0.0",
 		Schemas: types.CoreDomains(),
-	}, state
+	}, nil
 }
 
-// OnReady is called when the plugin is ready to start processing.
-func (p *PluginAutomationPlugin) OnReady() {}
-
-// WaitReady blocks until the plugin is ready.
-func (p *PluginAutomationPlugin) WaitReady(ctx context.Context) error {
+// Start launches the background group-refresh loop.
+func (p *PluginAutomationPlugin) Start(_ context.Context) error {
+	p.stop = make(chan struct{})
+	p.done = make(chan struct{})
+	go p.runRefreshLoop()
 	return nil
 }
 
-// OnShutdown is called when the plugin is being shut down.
-func (p *PluginAutomationPlugin) OnShutdown() {}
-
-// OnHealthCheck returns the health status of the plugin.
-func (p *PluginAutomationPlugin) OnHealthCheck() (string, error) {
-	return "perfect", nil
-}
-
-// OnConfigUpdate is called when the plugin's storage is updated.
-func (p *PluginAutomationPlugin) OnConfigUpdate(current types.Storage) (types.Storage, error) {
-	return current, nil
-}
-
-// OnDeviceCreate is called when a new device is created.
-func (p *PluginAutomationPlugin) OnDeviceCreate(dev types.Device) (types.Device, error) {
-	return dev, nil
-}
-
-// OnDeviceUpdate is called when a device is updated.
-func (p *PluginAutomationPlugin) OnDeviceUpdate(dev types.Device) (types.Device, error) {
-	return dev, nil
-}
-
-// OnDeviceDelete is called when a device is deleted.
-func (p *PluginAutomationPlugin) OnDeviceDelete(id string) error {
+// Stop signals the background loop and waits for it to exit.
+func (p *PluginAutomationPlugin) Stop() error {
+	if p.stop != nil {
+		close(p.stop)
+		<-p.done
+	}
 	return nil
 }
 
-// OnDeviceDiscover is called to list all devices managed by this plugin.
-func (p *PluginAutomationPlugin) OnDeviceDiscover(current []types.Device) ([]types.Device, error) {
-	return runner.EnsureCoreDevice("plugin-automation", current), nil
-}
-
-// OnDeviceSearch is called to search for devices.
-func (p *PluginAutomationPlugin) OnDeviceSearch(q types.SearchQuery, res []types.Device) ([]types.Device, error) {
-	return res, nil
-}
-
-// OnEntityCreate is called when a new entity is created.
-func (p *PluginAutomationPlugin) OnEntityCreate(e types.Entity) (types.Entity, error) {
-	return e, nil
-}
-
-// OnEntityUpdate is called when an entity is updated.
-func (p *PluginAutomationPlugin) OnEntityUpdate(e types.Entity) (types.Entity, error) {
-	return e, nil
-}
-
-// OnEntityDelete is called when an entity is deleted.
-func (p *PluginAutomationPlugin) OnEntityDelete(d, e string) error {
-	return nil
-}
-
-// OnEntityDiscover is called to list all entities for a device.
-func (p *PluginAutomationPlugin) OnEntityDiscover(d string, c []types.Entity) ([]types.Entity, error) {
-	if d == "plugin-automation" && p.master != nil {
-		groups := p.buildAutoGroups()
-		c = append(c, groups...)
-	}
-	return runner.EnsureCoreEntities("plugin-automation", d, c), nil
-}
-
-func (p *PluginAutomationPlugin) buildAutoGroups() []types.Entity {
-	matches, err := p.master.FindEntities(types.SearchQuery{Pattern: "*"})
-	if err != nil {
-		return nil
-	}
-
-	type sample struct {
-		domain  string
-		actions []string
-	}
-	groupSamples := map[string]sample{}
-	for _, m := range matches {
-		vals := m.Labels["PluginAutomation"]
-		if len(vals) == 0 {
-			continue
-		}
-		// Do not include generated automation groups in the source set.
-		if m.PluginID == "plugin-automation" && m.DeviceID == "plugin-automation" {
-			continue
-		}
-		for _, g := range vals {
-			g = strings.TrimSpace(g)
-			if g == "" {
-				continue
-			}
-			if _, ok := groupSamples[g]; !ok {
-				groupSamples[g] = sample{
-					domain:  strings.TrimSpace(m.Domain),
-					actions: append([]string(nil), m.Actions...),
-				}
+func (p *PluginAutomationPlugin) runRefreshLoop() {
+	defer close(p.done)
+	t := time.NewTicker(30 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-p.stop:
+			return
+		case <-t.C:
+			if err := p.refreshGroups(); err != nil {
+				p.log().Warn("refresh loop: group refresh failed", "err", err)
 			}
 		}
 	}
+}
 
-	if len(groupSamples) == 0 {
+// OnReset deletes all persisted devices and entities so a subsequent restart
+// re-creates only the canonical set from scratch.
+func (p *PluginAutomationPlugin) OnReset() error {
+	if p.pctx.Registry == nil {
 		return nil
 	}
-	names := make([]string, 0, len(groupSamples))
-	for name := range groupSamples {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-
-	out := make([]types.Entity, 0, len(names))
-	for _, name := range names {
-		s := groupSamples[name]
-		domain := s.domain
-		if domain == "" {
-			domain = "switch"
+	log := p.log()
+	log.Info("reset: wiping all devices and entities")
+	devices := p.pctx.Registry.LoadDevices()
+	log.Info("reset: wiping devices and entities", "device_count", len(devices))
+	for _, dev := range devices {
+		entities := p.pctx.Registry.GetEntities(p.pctx.Registry.Namespace(), dev.ID)
+		for _, ent := range entities {
+			log.Debug("reset: deleting entity", "device_id", dev.ID, "entity_id", ent.ID)
+			if err := p.pctx.Registry.DeleteEntity(p.pctx.Registry.Namespace(), dev.ID, ent.ID); err != nil {
+				return fmt.Errorf("reset: delete entity %s/%s: %w", dev.ID, ent.ID, err)
+			}
 		}
-		actions := append([]string(nil), s.actions...)
-		if len(actions) == 0 {
-			actions = []string{"turn_on", "turn_off"}
+		log.Debug("reset: deleting device", "device_id", dev.ID)
+		if err := p.pctx.Registry.DeleteDevice(dev.ID); err != nil {
+			return fmt.Errorf("reset: delete device %s: %w", dev.ID, err)
 		}
-		query := fmt.Sprintf("?label=PluginAutomation:%s", name)
-		out = append(out, types.Entity{
-			ID:        "group-" + normalizeID(name),
-			DeviceID:  "plugin-automation",
-			Domain:    domain,
-			LocalName: name,
-			Actions:   actions,
-			Labels: map[string][]string{
-				"Group":                {name},
-				"virtual_source_query": {query},
-			},
-			Data: types.EntityData{
-				SyncStatus: types.SyncStatusSynced,
-				UpdatedAt:  time.Now().UTC(),
-			},
-		})
 	}
-	return out
+	log.Info("reset: complete")
+	return p.pctx.Registry.DeleteState()
 }
 
-func normalizeID(s string) string {
-	s = strings.TrimSpace(strings.ToLower(s))
-	if s == "" {
-		return "unnamed"
-	}
-	var b strings.Builder
-	prevDash := false
-	for _, r := range s {
-		ok := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
-		if ok {
-			b.WriteRune(r)
-			prevDash = false
-			continue
-		}
-		if !prevDash {
-			b.WriteByte('-')
-			prevDash = true
-		}
-	}
-	id := strings.Trim(b.String(), "-")
-	if id == "" {
-		return "unnamed"
-	}
-	return id
+// OnCommand is a pass-through. Group entity commands are handled by the gateway's
+// virtual fan-out routing via the virtual_source_query label.
+func (p *PluginAutomationPlugin) OnCommand(_ types.Command, _ types.Entity) error {
+	return nil
 }
 
-// OnCommand handles commands sent to entities.
-// For the automation plugin, commands are handled by Lua scripts, not the plugin itself.
-// This method ensures proper error handling and sync status updates.
-func (p *PluginAutomationPlugin) OnCommand(req types.Command, entity types.Entity) (types.Entity, error) {
-	// The automation plugin passes commands to Lua scripts.
-	// If there was an error processing the command, it would be reflected here.
-	// Currently, this is a passthrough as Lua handles the actual command execution.
-	return entity, nil
+// refreshGroups queries the registry for PluginAutomation labels and upserts
+// the derived group entities into the groups device.
+func (p *PluginAutomationPlugin) refreshGroups() error {
+	var groups []types.Entity
+	if p.pctx.Registry != nil {
+		matches := p.pctx.Registry.FindEntities(types.SearchQuery{Pattern: "*"})
+		var err error
+		groups, err = buildAutoGroups(matches, p.log())
+		if err != nil {
+			return err
+		}
+	}
+	for _, ent := range groups {
+		if err := p.pctx.Registry.SaveEntity(ent); err != nil {
+			p.log().Warn("refresh groups: upsert failed", "entity_id", ent.ID, "err", err)
+		}
+	}
+	return nil
 }
 
-// OnEvent handles events and updates entity state accordingly.
-// On failure, it updates the SyncStatus to "failed" and includes error details
-// in the Reported state for the Slidebolt UI to display.
-func (p *PluginAutomationPlugin) OnEvent(evt types.Event, entity types.Entity) (types.Entity, error) {
-	raw, err := json.Marshal(evt.Payload)
-	if err != nil {
-		// Wrap the error with structured error type
-		pluginErr := pluginerrors.NewInvalidPayloadError(err)
-
-		// Update entity with error state
-		entity.Data.SyncStatus = types.SyncStatusFailed
-		entity.Data.UpdatedAt = time.Now().UTC()
-
-		// Create error state by merging existing reported data with error info
-		var reportedMap map[string]interface{}
-		if len(entity.Data.Reported) > 0 {
-			json.Unmarshal(entity.Data.Reported, &reportedMap)
-		}
-		if reportedMap == nil {
-			reportedMap = make(map[string]interface{})
-		}
-
-		// Add error information to the reported state
-		for k, v := range pluginErr.ToStateField() {
-			reportedMap[k] = v
-		}
-
-		entity.Data.Reported, _ = json.Marshal(reportedMap)
-		entity.Data.Effective = entity.Data.Reported
-
-		return entity, pluginErr
+func (p *PluginAutomationPlugin) log() *slog.Logger {
+	if p.logger != nil {
+		return p.logger
 	}
-
-	// Success case - payload marshaled successfully
-	entity.Data.Reported = raw
-	entity.Data.Effective = raw
-	entity.Data.SyncStatus = types.SyncStatusSynced
-	entity.Data.UpdatedAt = time.Now().UTC()
-	return entity, nil
+	return slog.Default()
 }

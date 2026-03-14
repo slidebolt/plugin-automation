@@ -9,16 +9,19 @@ import (
 
 	runner "github.com/slidebolt/sdk-runner"
 	"github.com/slidebolt/sdk-types"
+	"github.com/slidebolt/sdk-entities/light_strip"
 )
 
 // PluginAutomationPlugin implements the runner.Plugin interface.
 // It manages two virtual devices (core management + automation groups) and keeps
-// group entities in sync with the registry via a background refresh loop.
+// group entities in sync with the registry via NATS entity-change events,
+// debounced to coalesce rapid saves.
 type PluginAutomationPlugin struct {
-	pctx   runner.PluginContext
-	logger *slog.Logger
-	stop   chan struct{}
-	done   chan struct{}
+	pctx        runner.PluginContext
+	logger      *slog.Logger
+	stop        chan struct{}
+	done        chan struct{}
+	trigRefresh chan struct{} // debounce signal; closed on Stop
 }
 
 // Initialize registers the core and groups devices/entities, then runs the first
@@ -53,11 +56,25 @@ func (p *PluginAutomationPlugin) Initialize(ctx runner.PluginContext) (types.Man
 	}, nil
 }
 
-// Start launches the background group-refresh loop.
+// Start launches the background group-refresh loop and subscribes to registry
+// entity-change events so groups are rebuilt reactively rather than on a slow poll.
 func (p *PluginAutomationPlugin) Start(_ context.Context) error {
 	p.stop = make(chan struct{})
 	p.done = make(chan struct{})
-	go p.runRefreshLoop()
+	p.trigRefresh = make(chan struct{}, 1)
+
+	unsubscribe, err := p.pctx.Registry.OnEntityChanged(func() {
+		// Non-blocking send: coalesce rapid bursts into one refresh.
+		select {
+		case p.trigRefresh <- struct{}{}:
+		default:
+		}
+	})
+	if err != nil {
+		p.log().Warn("start: could not subscribe to entity changes, falling back to poll", "err", err)
+	}
+
+	go p.runRefreshLoop(unsubscribe)
 	return nil
 }
 
@@ -70,17 +87,38 @@ func (p *PluginAutomationPlugin) Stop() error {
 	return nil
 }
 
-func (p *PluginAutomationPlugin) runRefreshLoop() {
+func (p *PluginAutomationPlugin) runRefreshLoop(unsubscribe func()) {
 	defer close(p.done)
-	t := time.NewTicker(30 * time.Second)
-	defer t.Stop()
+	defer unsubscribe()
+
+	// Safety-net ticker: catches any edge cases missed by the event subscription.
+	safetyticker := time.NewTicker(5 * time.Minute)
+	defer safetyticker.Stop()
+
+	// Debounce timer: fires 500 ms after the last entity-change signal.
+	debounce := time.NewTimer(0)
+	if !debounce.Stop() {
+		<-debounce.C
+	}
+	debouncing := false
+
 	for {
 		select {
 		case <-p.stop:
 			return
-		case <-t.C:
+		case <-p.trigRefresh:
+			if !debouncing {
+				debounce.Reset(500 * time.Millisecond)
+				debouncing = true
+			}
+		case <-debounce.C:
+			debouncing = false
 			if err := p.refreshGroups(); err != nil {
 				p.log().Warn("refresh loop: group refresh failed", "err", err)
+			}
+		case <-safetyticker.C:
+			if err := p.refreshGroups(); err != nil {
+				p.log().Warn("refresh loop: safety refresh failed", "err", err)
 			}
 		}
 	}
@@ -113,15 +151,22 @@ func (p *PluginAutomationPlugin) OnReset() error {
 	return p.pctx.Registry.DeleteState()
 }
 
-// OnCommand handles commands for virtual group entities.
-// For light_strip entities, set_segment commands are routed directly to the
-// appropriate physical entity. All other domains (and non-segment strip commands)
-// are handled by the gateway's CommandQuery fan-out.
+// OnCommand handles commands for virtual group entities owned by plugin-automation.
+// Broadcast commands (turn_on, set_rgb, etc.) are routed via CommandQuery fan-out
+// by the gateway and never reach here. Only commands excluded from CommandFilter
+// — specifically set_segment for light_strip entities — are dispatched here for
+// positional translation to the correct physical entity.
 func (p *PluginAutomationPlugin) OnCommand(cmd types.Command, entity types.Entity) error {
-	if entity.Domain != "light_strip" {
-		return nil // broadcast groups handled by gateway fan-out
+	switch entity.Domain {
+	case light_strip.Type:
+		return p.handleStripCommand(cmd, entity)
+	default:
+		p.log().Error("OnCommand received unexpected domain — this is a bug", "domain", entity.Domain, "entity_id", entity.ID)
+		return nil
 	}
+}
 
+func (p *PluginAutomationPlugin) handleStripCommand(cmd types.Command, entity types.Entity) error {
 	var c struct {
 		Type    string `json:"type"`
 		Segment *struct {
@@ -133,8 +178,10 @@ func (p *PluginAutomationPlugin) OnCommand(cmd types.Command, entity types.Entit
 	if err := json.Unmarshal(cmd.Payload, &c); err != nil {
 		return err
 	}
-	if c.Type != "set_segment" {
-		return nil // non-segment commands handled by gateway fan-out via CommandQuery
+	if c.Type != light_strip.ActionSetSegment {
+		// Broadcast commands (filtered out of CommandFilter) should not reach here,
+		// but guard defensively.
+		return nil
 	}
 	if c.Segment == nil {
 		return fmt.Errorf("set_segment: segment is required")

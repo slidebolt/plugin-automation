@@ -9,7 +9,7 @@ require (
 	github.com/slidebolt/sdk-entities v1.20.2
 	github.com/slidebolt/sdk-integration-testing v0.0.4
 	github.com/slidebolt/sdk-runner v1.20.4
-	github.com/slidebolt/sdk-types v1.20.5
+	github.com/slidebolt/sdk-types v1.20.6
 	github.com/stretchr/testify v1.11.1
 )
 
@@ -22,12 +22,24 @@ require (
 	github.com/hashicorp/go-memdb v1.3.4 // indirect
 	github.com/hashicorp/golang-lru v0.5.4 // indirect
 	github.com/klauspost/compress v1.18.4 // indirect
+	github.com/kr/pretty v0.3.1 // indirect
 	github.com/nats-io/nkeys v0.4.15 // indirect
 	github.com/nats-io/nuid v1.0.1 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/robfig/cron/v3 v3.0.1 // indirect
-	github.com/spf13/pflag v1.0.7 // indirect
+	github.com/rogpeppe/go-internal v1.14.1 // indirect
+	github.com/spf13/pflag v1.0.10 // indirect
 	golang.org/x/crypto v0.48.0 // indirect
 	golang.org/x/sys v0.42.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+replace github.com/slidebolt/sdk-types => ../sdk-types
+
+replace github.com/slidebolt/registry => ../registry
+
+replace github.com/slidebolt/sdk-entities => ../sdk-entities
+
+replace github.com/slidebolt/sdk-integration-testing => ../sdk-integration-testing
+
+replace github.com/slidebolt/sdk-runner => ../sdk-runner

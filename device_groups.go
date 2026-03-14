@@ -159,12 +159,16 @@ func buildAutoGroups(matches []types.Entity, log *slog.Logger) ([]types.Entity, 
 					"Group":                {name},
 					"virtual_source_query": {fmt.Sprintf("?label=PluginAutomation:%s", name)},
 				},
-				CommandQuery: &types.SearchQuery{
-					Labels: map[string][]string{"PluginAutomation": {name}},
-				},
 				Meta: map[string]json.RawMessage{
 					"strip_members": membersJSON,
 				},
+				// CommandQuery fans out broadcast commands to every member light.
+				// CommandFilter excludes set_segment so it falls through to OnCommand
+				// for positional translation.
+				CommandQuery: &types.SearchQuery{
+					Labels: map[string][]string{"PluginAutomation": {name}},
+				},
+				CommandFilter: light_strip.BroadcastActions(),
 				Data: types.EntityData{
 					SyncStatus: types.SyncStatusSynced,
 					UpdatedAt:  time.Now().UTC(),

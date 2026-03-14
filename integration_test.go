@@ -119,10 +119,11 @@ func TestIntegration_SetSegment_Dispatch(t *testing.T) {
 	defer sub.Unsubscribe()
 
 	// --- Step 3: wait for plugin-automation to build the virtual strip ---
-	// refreshGroups runs every 30 s; wait up to 40 s for the strip entity.
+	// refreshGroups is triggered reactively via NATS entity-change events;
+	// with a 500 ms debounce it should complete within a couple of seconds.
 
 	t.Log("waiting for plugin-automation to create virtual strip entity...")
-	found := s.WaitFor(40*time.Second, func() bool {
+	found := s.WaitFor(10*time.Second, func() bool {
 		var entities []map[string]any
 		path := fmt.Sprintf("/api/plugins/%s/devices/%s/entities", pluginID, stripDeviceID)
 		if err := s.GetJSON(path, &entities); err != nil {

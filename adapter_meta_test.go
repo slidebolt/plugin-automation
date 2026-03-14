@@ -2,8 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"slices"
 	"testing"
 
+	"github.com/slidebolt/sdk-entities/light_strip"
 	"github.com/slidebolt/sdk-types"
 )
 
@@ -144,8 +146,26 @@ func TestBuildAutoGroupsWithMeta(t *testing.T) {
 				if members[1].Index != 1 || members[1].EntityID != "led2" {
 					t.Errorf("member[1]: %+v", members[1])
 				}
+				// Strip entity must have CommandQuery (fan-out for broadcast commands)
+				// and CommandFilter that excludes set_segment so it falls through to OnCommand.
 				if g.CommandQuery == nil {
-					t.Fatal("expected CommandQuery")
+					t.Fatal("strip entity: expected CommandQuery to be set")
+				}
+				if vals := g.CommandQuery.Labels["PluginAutomation"]; len(vals) != 1 || vals[0] != "BasementLS" {
+					t.Errorf("strip entity CommandQuery labels: %v", g.CommandQuery.Labels)
+				}
+				wantFilter := light_strip.BroadcastActions()
+				got := make([]string, len(g.CommandFilter))
+				copy(got, g.CommandFilter)
+				slices.Sort(got)
+				want := make([]string, len(wantFilter))
+				copy(want, wantFilter)
+				slices.Sort(want)
+				if !slices.Equal(got, want) {
+					t.Errorf("strip entity CommandFilter: got %v, want %v", got, want)
+				}
+				if slices.Contains(g.CommandFilter, light_strip.ActionSetSegment) {
+					t.Error("strip entity CommandFilter must NOT contain set_segment")
 				}
 			},
 		},

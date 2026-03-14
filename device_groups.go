@@ -1,12 +1,14 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"sort"
 	"strings"
 	"time"
 
+	light_strip "github.com/slidebolt/sdk-entities/light_strip"
 	"github.com/slidebolt/sdk-types"
 )
 
@@ -18,18 +20,45 @@ func groupsDevice() types.Device {
 	}
 }
 
-// buildAutoGroups creates one virtual group entity per distinct PluginAutomation label.
+// automationMeta holds the parsed JSON blob stored in entity.Meta["PluginAutomation:<group>"].
+type automationMeta struct {
+	Domain string `json:"domain,omitempty"`
+	Index  *int   `json:"index,omitempty"`
+	Row    *int   `json:"row,omitempty"`
+	Col    *int   `json:"col,omitempty"`
+}
+
+// stripMember records a single positional member of a light_strip virtual entity.
+type stripMember struct {
+	Index    int    `json:"index"`
+	PluginID string `json:"plugin_id"`
+	DeviceID string `json:"device_id"`
+	EntityID string `json:"entity_id"`
+}
+
+// buildAutoGroups creates virtual group entities from PluginAutomation labels.
+//
+// Two kinds of virtual entity are produced:
+//   - Broadcast groups: no member carries positional meta (existing behavior).
+//   - Strip groups: at least one member has an "index" in its meta blob;
+//     these get domain "light_strip" and a sorted strip_members meta blob.
 func buildAutoGroups(matches []types.Entity, log *slog.Logger) ([]types.Entity, error) {
 	if log == nil {
 		log = slog.Default()
 	}
 	log.Debug("groups: registry returned entities", "total", len(matches))
 
-	type sample struct {
+	type broadcastSample struct {
 		domain  string
 		actions []string
 	}
-	groupSamples := map[string]sample{}
+	type groupAccumulator struct {
+		broadcast *broadcastSample
+		strip     []stripMember
+	}
+
+	accumulators := map[string]*groupAccumulator{}
+
 	for _, m := range matches {
 		vals := m.Labels["PluginAutomation"]
 		if len(vals) == 0 {
@@ -50,22 +79,56 @@ func buildAutoGroups(matches []types.Entity, log *slog.Logger) ([]types.Entity, 
 			if g == "" {
 				continue
 			}
-			if _, ok := groupSamples[g]; !ok {
-				groupSamples[g] = sample{
-					domain:  strings.TrimSpace(m.Domain),
-					actions: append([]string(nil), m.Actions...),
+			if accumulators[g] == nil {
+				accumulators[g] = &groupAccumulator{}
+			}
+			acc := accumulators[g]
+
+			// Parse optional meta blob for this entity/group membership.
+			var meta automationMeta
+			if raw, ok := m.Meta["PluginAutomation:"+g]; ok {
+				if err := json.Unmarshal(raw, &meta); err != nil {
+					log.Warn("groups: failed to parse meta blob",
+						"entity_id", m.ID, "group", g, "err", err)
+				}
+			}
+
+			if meta.Index != nil {
+				// Positional member → contributes to a strip group.
+				acc.strip = append(acc.strip, stripMember{
+					Index:    *meta.Index,
+					PluginID: m.PluginID,
+					DeviceID: m.DeviceID,
+					EntityID: m.ID,
+				})
+			} else {
+				// Non-positional member → contributes to a broadcast group.
+				// Only the first-seen entity sets the domain/actions.
+				if acc.broadcast == nil {
+					domain := strings.TrimSpace(m.Domain)
+					if meta.Domain != "" {
+						domain = meta.Domain
+					}
+					if domain == "" {
+						domain = "switch"
+					}
+					actions := append([]string(nil), m.Actions...)
+					if len(actions) == 0 {
+						actions = []string{"turn_on", "turn_off"}
+					}
+					acc.broadcast = &broadcastSample{domain: domain, actions: actions}
 				}
 			}
 		}
 	}
 
-	if len(groupSamples) == 0 {
+	if len(accumulators) == 0 {
 		log.Info("groups: no PluginAutomation labels found — no groups to build")
 		return nil, nil
 	}
 
-	names := make([]string, 0, len(groupSamples))
-	for name := range groupSamples {
+	names := make([]string, 0, len(accumulators))
+	for name := range accumulators {
 		names = append(names, name)
 	}
 	sort.Strings(names)
@@ -73,30 +136,61 @@ func buildAutoGroups(matches []types.Entity, log *slog.Logger) ([]types.Entity, 
 
 	out := make([]types.Entity, 0, len(names))
 	for _, name := range names {
-		s := groupSamples[name]
-		domain := s.domain
-		if domain == "" {
-			domain = "switch"
+		acc := accumulators[name]
+
+		if len(acc.strip) > 0 {
+			// Strip group: at least one positional member.
+			members := make([]stripMember, len(acc.strip))
+			copy(members, acc.strip)
+			sort.Slice(members, func(i, j int) bool {
+				return members[i].Index < members[j].Index
+			})
+			membersJSON, err := json.Marshal(members)
+			if err != nil {
+				return nil, fmt.Errorf("marshal strip_members for %q: %w", name, err)
+			}
+			out = append(out, types.Entity{
+				ID:        "group-" + normalizeID(name),
+				DeviceID:  "groups",
+				Domain:    light_strip.Type,
+				LocalName: name,
+				Actions:   light_strip.SupportedActions(),
+				Labels: map[string][]string{
+					"Group":                {name},
+					"virtual_source_query": {fmt.Sprintf("?label=PluginAutomation:%s", name)},
+				},
+				CommandQuery: &types.SearchQuery{
+					Labels: map[string][]string{"PluginAutomation": {name}},
+				},
+				Meta: map[string]json.RawMessage{
+					"strip_members": membersJSON,
+				},
+				Data: types.EntityData{
+					SyncStatus: types.SyncStatusSynced,
+					UpdatedAt:  time.Now().UTC(),
+				},
+			})
+		} else if acc.broadcast != nil {
+			// Broadcast group: no positional members.
+			out = append(out, types.Entity{
+				ID:        "group-" + normalizeID(name),
+				DeviceID:  "groups",
+				Domain:    acc.broadcast.domain,
+				LocalName: name,
+				Actions:   acc.broadcast.actions,
+				Labels: map[string][]string{
+					"Group":                {name},
+					"virtual_source_query": {fmt.Sprintf("?label=PluginAutomation:%s", name)},
+				},
+				CommandQuery: &types.SearchQuery{
+					Labels: map[string][]string{"PluginAutomation": {name}},
+				},
+				Data: types.EntityData{
+					SyncStatus: types.SyncStatusSynced,
+					UpdatedAt:  time.Now().UTC(),
+				},
+			})
 		}
-		actions := append([]string(nil), s.actions...)
-		if len(actions) == 0 {
-			actions = []string{"turn_on", "turn_off"}
-		}
-		out = append(out, types.Entity{
-			ID:        "group-" + normalizeID(name),
-			DeviceID:  "groups",
-			Domain:    domain,
-			LocalName: name,
-			Actions:   actions,
-			Labels: map[string][]string{
-				"Group":                {name},
-				"virtual_source_query": {fmt.Sprintf("?label=PluginAutomation:%s", name)},
-			},
-			Data: types.EntityData{
-				SyncStatus: types.SyncStatusSynced,
-				UpdatedAt:  time.Now().UTC(),
-			},
-		})
 	}
 	return out, nil
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"time"
@@ -112,10 +113,82 @@ func (p *PluginAutomationPlugin) OnReset() error {
 	return p.pctx.Registry.DeleteState()
 }
 
-// OnCommand is a pass-through. Group entity commands are handled by the gateway's
-// virtual fan-out routing via the virtual_source_query label.
-func (p *PluginAutomationPlugin) OnCommand(_ types.Command, _ types.Entity) error {
-	return nil
+// OnCommand handles commands for virtual group entities.
+// For light_strip entities, set_segment commands are routed directly to the
+// appropriate physical entity. All other domains (and non-segment strip commands)
+// are handled by the gateway's CommandQuery fan-out.
+func (p *PluginAutomationPlugin) OnCommand(cmd types.Command, entity types.Entity) error {
+	if entity.Domain != "light_strip" {
+		return nil // broadcast groups handled by gateway fan-out
+	}
+
+	var c struct {
+		Type    string `json:"type"`
+		Segment *struct {
+			Index      int   `json:"index"`
+			RGB        []int `json:"rgb,omitempty"`
+			Brightness *int  `json:"brightness,omitempty"`
+		} `json:"segment,omitempty"`
+	}
+	if err := json.Unmarshal(cmd.Payload, &c); err != nil {
+		return err
+	}
+	if c.Type != "set_segment" {
+		return nil // non-segment commands handled by gateway fan-out via CommandQuery
+	}
+	if c.Segment == nil {
+		return fmt.Errorf("set_segment: segment is required")
+	}
+
+	members, err := loadStripMembers(entity)
+	if err != nil {
+		return err
+	}
+
+	var target *stripMember
+	for i := range members {
+		if members[i].Index == c.Segment.Index {
+			target = &members[i]
+			break
+		}
+	}
+	if target == nil {
+		return fmt.Errorf("set_segment: no member at index %d", c.Segment.Index)
+	}
+
+	var payload json.RawMessage
+	if len(c.Segment.RGB) == 3 {
+		payload, err = json.Marshal(map[string]any{"type": "set_rgb", "rgb": c.Segment.RGB})
+	} else if c.Segment.Brightness != nil {
+		payload, err = json.Marshal(map[string]any{"type": "set_brightness", "brightness": *c.Segment.Brightness})
+	} else {
+		return fmt.Errorf("set_segment: must provide rgb or brightness")
+	}
+	if err != nil {
+		return err
+	}
+
+	return p.pctx.Commands.SendCommand(types.Command{
+		ID:         cmd.ID + "-seg",
+		PluginID:   target.PluginID,
+		DeviceID:   target.DeviceID,
+		EntityID:   target.EntityID,
+		EntityType: "light",
+		Payload:    payload,
+	})
+}
+
+// loadStripMembers unmarshals the strip_members meta blob from a light_strip entity.
+func loadStripMembers(entity types.Entity) ([]stripMember, error) {
+	raw, ok := entity.Meta["strip_members"]
+	if !ok {
+		return nil, fmt.Errorf("entity %s has no strip_members meta", entity.ID)
+	}
+	var members []stripMember
+	if err := json.Unmarshal(raw, &members); err != nil {
+		return nil, fmt.Errorf("unmarshal strip_members for %s: %w", entity.ID, err)
+	}
+	return members, nil
 }
 
 // refreshGroups queries the registry for PluginAutomation labels and upserts

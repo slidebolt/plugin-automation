@@ -26,3 +26,5 @@ TASKS/
 
 scripts/.release_guard
 multi_local_house_test.go
+
+**/.env.local

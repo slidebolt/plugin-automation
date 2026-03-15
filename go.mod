@@ -5,10 +5,10 @@ go 1.25.7
 require (
 	github.com/cucumber/godog v0.15.1
 	github.com/nats-io/nats.go v1.49.0
-	github.com/slidebolt/registry v0.0.7
-	github.com/slidebolt/sdk-entities v1.20.6
-	github.com/slidebolt/sdk-integration-testing v0.0.7
-	github.com/slidebolt/sdk-runner v1.20.9
+	github.com/slidebolt/registry v0.0.9
+	github.com/slidebolt/sdk-entities v1.21.0
+	github.com/slidebolt/sdk-integration-testing v0.0.8
+	github.com/slidebolt/sdk-runner v1.20.10
 	github.com/slidebolt/sdk-types v1.20.9
 	github.com/stretchr/testify v1.11.1
 )

@@ -323,6 +323,117 @@ func TestHandleStripCommand_EntityTypeIsLight(t *testing.T) {
 	}
 }
 
+// ── handlePanelCommand ─────────────────────────────────────────────────────
+
+func makePanelEntity(members []panelMember) types.Entity {
+	raw, err := json.Marshal(members)
+	if err != nil {
+		panic(err)
+	}
+	return types.Entity{
+		ID:     "group-officepanel",
+		Domain: "light_panel",
+		Meta:   map[string]json.RawMessage{"panel_members": raw},
+	}
+}
+
+func TestOnCommand_LightPanel_SetPanel_Dispatches(t *testing.T) {
+	p, svc := newTestPluginWithCommands(t)
+
+	entity := makePanelEntity([]panelMember{
+		{PanelID: 10, PluginID: "plugin-esphome", DeviceID: "office-01", EntityID: "light-01"},
+		{PanelID: 20, PluginID: "plugin-esphome", DeviceID: "office-02", EntityID: "light-02"},
+	})
+	cmd := makeCommand(map[string]any{
+		"type":  "set_panel",
+		"panel": map[string]any{"id": 20, "rgb": []int{0, 128, 255}},
+	})
+
+	if err := p.OnCommand(cmd, entity); err != nil {
+		t.Fatalf("OnCommand: %v", err)
+	}
+	if len(svc.sent) != 1 {
+		t.Fatalf("expected 1 downstream command, got %d", len(svc.sent))
+	}
+	sent := svc.sent[0]
+	if sent.EntityID != "light-02" {
+		t.Errorf("downstream EntityID: got %q, want light-02", sent.EntityID)
+	}
+	var payload map[string]any
+	_ = json.Unmarshal(sent.Payload, &payload)
+	if payload["type"] != "set_rgb" {
+		t.Errorf("downstream type: got %v, want set_rgb", payload["type"])
+	}
+	rgb, _ := payload["rgb"].([]any)
+	if len(rgb) != 3 || rgb[1].(float64) != 128 {
+		t.Errorf("downstream rgb: %v", payload["rgb"])
+	}
+}
+
+func TestHandlePanelCommand_PanelIDNotFound(t *testing.T) {
+	p, _ := newTestPluginWithCommands(t)
+
+	entity := makePanelEntity([]panelMember{
+		{PanelID: 10, PluginID: "p", DeviceID: "d", EntityID: "e"},
+	})
+	cmd := makeCommand(map[string]any{
+		"type":  "set_panel",
+		"panel": map[string]any{"id": 99, "rgb": []int{1, 2, 3}},
+	})
+
+	if err := p.OnCommand(cmd, entity); err == nil {
+		t.Fatal("expected error for unknown panel_id, got nil")
+	}
+}
+
+func TestHandlePanelCommand_MissingPanel(t *testing.T) {
+	p, _ := newTestPluginWithCommands(t)
+
+	entity := makePanelEntity([]panelMember{
+		{PanelID: 10, PluginID: "p", DeviceID: "d", EntityID: "e"},
+	})
+	cmd := makeCommand(map[string]any{"type": "set_panel"})
+
+	if err := p.OnCommand(cmd, entity); err == nil {
+		t.Fatal("expected error for missing panel, got nil")
+	}
+}
+
+func TestHandlePanelCommand_CommandIDDerivation(t *testing.T) {
+	p, svc := newTestPluginWithCommands(t)
+
+	entity := makePanelEntity([]panelMember{
+		{PanelID: 10, PluginID: "p", DeviceID: "d", EntityID: "e"},
+	})
+	cmd := types.Command{
+		ID:      "original-cmd",
+		Payload: mustMarshal(map[string]any{"type": "set_panel", "panel": map[string]any{"id": 10, "rgb": []int{1, 2, 3}}}),
+	}
+
+	if err := p.OnCommand(cmd, entity); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if svc.sent[0].ID != "original-cmd-panel" {
+		t.Errorf("downstream ID: got %q, want %q", svc.sent[0].ID, "original-cmd-panel")
+	}
+}
+
+func TestHandlePanelCommand_NonPanelCommand_Ignored(t *testing.T) {
+	p, svc := newTestPluginWithCommands(t)
+
+	entity := makePanelEntity([]panelMember{
+		{PanelID: 10, PluginID: "p", DeviceID: "d", EntityID: "e"},
+	})
+	cmd := makeCommand(map[string]any{"type": "turn_on"})
+
+	if err := p.OnCommand(cmd, entity); err != nil {
+		t.Fatalf("expected nil for non-panel command, got: %v", err)
+	}
+	if len(svc.sent) != 0 {
+		t.Errorf("expected no downstream commands for turn_on on panel, got %d", len(svc.sent))
+	}
+}
+
 func mustMarshal(v any) json.RawMessage {
 	b, err := json.Marshal(v)
 	if err != nil {

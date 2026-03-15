@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/slidebolt/sdk-entities/light_panel"
 	"github.com/slidebolt/sdk-entities/light_strip"
 	runner "github.com/slidebolt/sdk-runner"
 	"github.com/slidebolt/sdk-types"
@@ -160,6 +161,8 @@ func (p *PluginAutomationPlugin) OnCommand(cmd types.Command, entity types.Entit
 	switch entity.Domain {
 	case light_strip.Type:
 		return p.handleStripCommand(cmd, entity)
+	case light_panel.Type:
+		return p.handlePanelCommand(cmd, entity)
 	default:
 		p.log().Error("OnCommand received unexpected domain — this is a bug", "domain", entity.Domain, "entity_id", entity.ID)
 		return nil
@@ -234,6 +237,71 @@ func loadStripMembers(entity types.Entity) ([]stripMember, error) {
 	var members []stripMember
 	if err := json.Unmarshal(raw, &members); err != nil {
 		return nil, fmt.Errorf("unmarshal strip_members for %s: %w", entity.ID, err)
+	}
+	return members, nil
+}
+
+func (p *PluginAutomationPlugin) handlePanelCommand(cmd types.Command, entity types.Entity) error {
+	var c struct {
+		Type  string `json:"type"`
+		Panel *struct {
+			ID  int   `json:"id"`
+			RGB []int `json:"rgb,omitempty"`
+		} `json:"panel,omitempty"`
+	}
+	if err := json.Unmarshal(cmd.Payload, &c); err != nil {
+		return err
+	}
+	if c.Type != light_panel.ActionSetPanel {
+		return nil
+	}
+	if c.Panel == nil {
+		return fmt.Errorf("set_panel: panel is required")
+	}
+
+	members, err := loadPanelMembers(entity)
+	if err != nil {
+		return err
+	}
+
+	var target *panelMember
+	for i := range members {
+		if members[i].PanelID == c.Panel.ID {
+			target = &members[i]
+			break
+		}
+	}
+	if target == nil {
+		return fmt.Errorf("set_panel: no member with panel_id %d", c.Panel.ID)
+	}
+
+	if len(c.Panel.RGB) != 3 {
+		return fmt.Errorf("set_panel: rgb[3] required")
+	}
+	payload, err := json.Marshal(map[string]any{"type": "set_rgb", "rgb": c.Panel.RGB})
+	if err != nil {
+		return err
+	}
+
+	return p.pctx.Commands.SendCommand(types.Command{
+		ID:         cmd.ID + "-panel",
+		PluginID:   target.PluginID,
+		DeviceID:   target.DeviceID,
+		EntityID:   target.EntityID,
+		EntityType: "light",
+		Payload:    payload,
+	})
+}
+
+// loadPanelMembers unmarshals the panel_members meta blob from a light_panel entity.
+func loadPanelMembers(entity types.Entity) ([]panelMember, error) {
+	raw, ok := entity.Meta["panel_members"]
+	if !ok {
+		return nil, fmt.Errorf("entity %s has no panel_members meta", entity.ID)
+	}
+	var members []panelMember
+	if err := json.Unmarshal(raw, &members); err != nil {
+		return nil, fmt.Errorf("unmarshal panel_members for %s: %w", entity.ID, err)
 	}
 	return members, nil
 }

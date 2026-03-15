@@ -50,6 +50,162 @@ func TestIntegration_CoreDevicesPresent(t *testing.T) {
 // plugin-automation to create the virtual light_strip entity, sends a
 // set_segment command to the strip, and asserts that the translated set_rgb
 // command arrives on NATS for the correct physical entity.
+// TestIntegration_SetPanel_Dispatch boots plugin-automation alongside
+// plugin-test-clean. It seeds two light entities on plugin-test-clean with
+// PluginAutomation:OfficeP labels and panel_id meta blobs, waits for
+// plugin-automation to create the virtual light_panel entity, sends a
+// set_panel command to the panel, and asserts that the translated set_rgb
+// command arrives on NATS for the correct physical entity (matched by panel_id,
+// not positional index).
+func TestIntegration_SetPanel_Dispatch(t *testing.T) {
+	const (
+		leafPluginID   = "plugin-test-clean"
+		leafDeviceID   = "test-panel-device"
+		entity0ID      = "panel-light-0"
+		entity1ID      = "panel-light-1"
+		groupName      = "OfficeP"
+		panelEntityID  = "group-officep"
+		panelDeviceID  = "groups"
+		panel0ID       = 100
+		panel1ID       = 200
+	)
+
+	s := integrationtesting.NewMulti(t,
+		integrationtesting.PluginSpec{Module: "github.com/slidebolt/plugin-automation", Dir: "."},
+		integrationtesting.PluginSpec{Module: "github.com/slidebolt/plugin-test-clean", Dir: "../plugin-test-clean"},
+	)
+	s.RequirePlugin(pluginID)
+	s.RequirePlugin(leafPluginID)
+
+	// --- Step 1: seed two light entities with panel_id meta ---
+
+	metaFor := func(panelID int) json.RawMessage {
+		raw, _ := json.Marshal(map[string]any{"domain": "light_panel", "panel_id": panelID})
+		return raw
+	}
+
+	seedEntity := func(entityID string, panelID int) {
+		entity := types.Entity{
+			ID:       entityID,
+			DeviceID: leafDeviceID,
+			Domain:   "light",
+			Labels: map[string][]string{
+				"PluginAutomation": {groupName},
+			},
+			Meta: map[string]json.RawMessage{
+				fmt.Sprintf("PluginAutomation:%s", groupName): metaFor(panelID),
+			},
+		}
+		path := fmt.Sprintf("/api/plugins/%s/devices/%s/entities", leafPluginID, leafDeviceID)
+		if err := s.PostJSON(path, entity, nil); err != nil {
+			t.Fatalf("seed entity %s: %v", entityID, err)
+		}
+	}
+
+	seedEntity(entity0ID, panel0ID)
+	seedEntity(entity1ID, panel1ID)
+	t.Log("seeded panel leaf entities")
+
+	// --- Step 2: subscribe to NATS ---
+
+	nc, err := nats.Connect(s.NATSURL())
+	if err != nil {
+		t.Fatalf("nats connect: %v", err)
+	}
+	defer nc.Close()
+
+	cmdCh := make(chan types.Command, 8)
+	sub, err := nc.Subscribe(
+		"slidebolt.rpc."+leafPluginID+".command",
+		func(msg *nats.Msg) {
+			var cmd types.Command
+			if json.Unmarshal(msg.Data, &cmd) == nil {
+				cmdCh <- cmd
+			}
+		},
+	)
+	if err != nil {
+		t.Fatalf("nats subscribe: %v", err)
+	}
+	defer sub.Unsubscribe()
+
+	// --- Step 3: wait for plugin-automation to create the virtual panel entity ---
+
+	t.Log("waiting for plugin-automation to create virtual panel entity...")
+	found := s.WaitFor(10*time.Second, func() bool {
+		var entities []map[string]any
+		path := fmt.Sprintf("/api/plugins/%s/devices/%s/entities", pluginID, panelDeviceID)
+		if err := s.GetJSON(path, &entities); err != nil {
+			return false
+		}
+		for _, e := range entities {
+			if id, _ := e["id"].(string); id == panelEntityID {
+				domain, _ := e["domain"].(string)
+				return domain == "light_panel"
+			}
+		}
+		return false
+	})
+	if !found {
+		t.Fatal("timed out waiting for virtual light_panel entity to appear")
+	}
+	t.Logf("virtual panel entity %q found", panelEntityID)
+
+	// --- Step 4: send set_panel targeting panel_id=200 (entity1) ---
+
+	cmdPath := fmt.Sprintf("/api/plugins/%s/devices/%s/entities/%s/commands",
+		pluginID, panelDeviceID, panelEntityID)
+	payload := map[string]any{
+		"type":  "set_panel",
+		"panel": map[string]any{"id": panel1ID, "rgb": []int{0, 128, 255}},
+	}
+	if err := s.PostJSON(cmdPath, payload, nil); err != nil {
+		t.Fatalf("send set_panel: %v", err)
+	}
+	t.Log("set_panel sent to virtual panel entity")
+
+	// --- Step 5: assert set_rgb dispatched to entity-1 ---
+
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+
+	var got types.Command
+	select {
+	case got = <-cmdCh:
+	case <-deadline.C:
+		t.Fatal("timed out waiting for dispatched set_rgb command on NATS")
+	}
+
+	if got.EntityID != entity1ID {
+		t.Errorf("expected command for entity %q (panel_id=%d), got %q", entity1ID, panel1ID, got.EntityID)
+	}
+
+	var cmdPayload struct {
+		Type string `json:"type"`
+		RGB  []int  `json:"rgb"`
+	}
+	if err := json.Unmarshal(got.Payload, &cmdPayload); err != nil {
+		t.Fatalf("unmarshal dispatched payload: %v", err)
+	}
+	if cmdPayload.Type != "set_rgb" {
+		t.Errorf("expected command type set_rgb, got %q", cmdPayload.Type)
+	}
+	if len(cmdPayload.RGB) != 3 || cmdPayload.RGB[1] != 128 {
+		t.Errorf("expected rgb=[0,128,255], got %v", cmdPayload.RGB)
+	}
+
+	// Assert entity-0 did NOT receive a command.
+	select {
+	case extra := <-cmdCh:
+		if extra.EntityID == entity0ID {
+			t.Errorf("entity-0 (panel_id=%d) should NOT have received a command but did: %+v", panel0ID, extra)
+		}
+	default:
+	}
+
+	t.Logf("set_rgb dispatched correctly by panel_id: entity=%s rgb=%v", got.EntityID, cmdPayload.RGB)
+}
+
 func TestIntegration_SetSegment_Dispatch(t *testing.T) {
 	const (
 		leafPluginID  = "plugin-test-clean"

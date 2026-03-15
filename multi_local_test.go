@@ -25,6 +25,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -712,6 +713,137 @@ func TestMultiLocal_MainLBAndWizAsOneGroupViaAPI(t *testing.T) {
 	}
 
 	t.Logf("mixed group command changed %d zigbee+wiz leaves as one group", len(leaves))
+}
+
+// TestMultiLocal_BasementOfficeLightPanel discovers the three basement office
+// ESPHome wafer lights (basement-26/27/28-office-0*), creates a virtual
+// light_panel from them with panel_ids 0/1/2, and verifies that a set_panel
+// command targeting panel_id=1 routes set_rgb only to that specific entity.
+func TestMultiLocal_BasementOfficeLightPanel(t *testing.T) {
+	s := integrationtesting.GetSuite(t)
+	s.RequirePlugin("plugin-automation")
+	s.SkipUnlessPlugin(t, "plugin-esphome")
+
+	// Wait for all three basement office devices with their light entities.
+	type leaf struct {
+		device, entity string
+		panelID        int
+	}
+	devicePanelIDs := map[string]int{
+		"basement-26-office-01": 0,
+		"basement-27-office-02": 1,
+		"basement-28-office-03": 2,
+	}
+
+	var leaves []leaf
+	found := s.WaitFor(30*time.Second, func() bool {
+		leaves = leaves[:0]
+		for deviceID, panelID := range devicePanelIDs {
+			var entities []map[string]any
+			if err := s.GetJSON(fmt.Sprintf("/api/plugins/plugin-esphome/devices/%s/entities", deviceID), &entities); err != nil {
+				continue
+			}
+			for _, e := range entities {
+				if domain, _ := e["domain"].(string); domain == "light" {
+					entityID, _ := e["id"].(string)
+					if entityID != "" {
+						leaves = append(leaves, leaf{deviceID, entityID, panelID})
+						break
+					}
+				}
+			}
+		}
+		return len(leaves) == 3
+	})
+	if !found {
+		t.Skipf("need 3 basement office ESPHome light entities, found %d — skipping", len(leaves))
+	}
+	// Sort by panel_id for determinism.
+	sort.Slice(leaves, func(i, j int) bool { return leaves[i].panelID < leaves[j].panelID })
+	t.Logf("basement office leaves: %+v", leaves)
+
+	groupName := fmt.Sprintf("BasementOfficePanel%d", time.Now().UnixNano()%10000)
+
+	// Label each leaf with its panel_id meta.
+	for _, l := range leaves {
+		metaBlob, _ := json.Marshal(map[string]any{"domain": "light_panel", "panel_id": l.panelID})
+		labelsPath := fmt.Sprintf("/api/plugins/plugin-esphome/devices/%s/entities/%s/labels", l.device, l.entity)
+		metaPath := fmt.Sprintf("/api/plugins/plugin-esphome/devices/%s/entities/%s/meta", l.device, l.entity)
+		if err := s.PatchJSON(labelsPath, map[string]any{"labels": map[string][]string{"PluginAutomation": {groupName}}}, nil); err != nil {
+			t.Fatalf("patch labels on %s/%s: %v", l.device, l.entity, err)
+		}
+		if err := s.PatchJSON(metaPath, map[string]json.RawMessage{
+			"PluginAutomation:" + groupName: json.RawMessage(metaBlob),
+		}, nil); err != nil {
+			t.Fatalf("patch meta on %s/%s: %v", l.device, l.entity, err)
+		}
+	}
+	t.Logf("labeled %d office lights as panel group %q", len(leaves), groupName)
+
+	// Wait for the light_panel virtual entity to appear.
+	panelID := "group-" + lowercasedLocal(groupName)
+	ok := s.WaitFor(20*time.Second, func() bool {
+		var entities []map[string]any
+		_ = s.GetJSON("/api/plugins/plugin-automation/devices/groups/entities", &entities)
+		for _, e := range entities {
+			if id, _ := e["id"].(string); id == panelID {
+				if domain, _ := e["domain"].(string); domain == "light_panel" {
+					return true
+				}
+			}
+		}
+		return false
+	})
+	if !ok {
+		t.Fatalf("virtual light_panel entity %q did not appear after 10s", panelID)
+	}
+	t.Logf("virtual light_panel %q created", panelID)
+
+	// Subscribe to NATS to capture translated set_rgb.
+	nc, err := nats.Connect(s.NATSURL())
+	if err != nil {
+		t.Fatalf("nats: %v", err)
+	}
+	defer nc.Close()
+
+	cmdCh := make(chan types.Command, 8)
+	sub, _ := nc.Subscribe("slidebolt.rpc.plugin-esphome.command", func(msg *nats.Msg) {
+		var cmd types.Command
+		if json.Unmarshal(msg.Data, &cmd) == nil {
+			cmdCh <- cmd
+		}
+	})
+	defer sub.Unsubscribe()
+
+	// Send set_panel targeting panel_id=1 (basement-27-office-02).
+	targetLeaf := leaves[1] // panel_id=1
+	cmdPath := fmt.Sprintf("/api/plugins/plugin-automation/devices/groups/entities/%s/commands", panelID)
+	if err := s.PostJSON(cmdPath, map[string]any{
+		"type":  "set_panel",
+		"panel": map[string]any{"id": 1, "rgb": []int{0, 200, 100}},
+	}, nil); err != nil {
+		t.Fatalf("send set_panel: %v", err)
+	}
+	t.Logf("set_panel(id=1, rgb=[0,200,100]) sent — expecting entity %s on device %s", targetLeaf.entity, targetLeaf.device)
+
+	select {
+	case got := <-cmdCh:
+		if got.EntityID != targetLeaf.entity {
+			t.Errorf("expected routed entity %q (panel_id=1), got %q", targetLeaf.entity, got.EntityID)
+		}
+		var p struct {
+			Type string `json:"type"`
+			RGB  []int  `json:"rgb"`
+		}
+		if json.Unmarshal(got.Payload, &p) == nil {
+			t.Logf("dispatched: type=%s rgb=%v entity=%s device=%s", p.Type, p.RGB, got.EntityID, got.DeviceID)
+		}
+		if p.Type != "set_rgb" {
+			t.Errorf("expected set_rgb, got %q", p.Type)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for set_rgb on NATS from panel routing")
+	}
 }
 
 func lowercasedLocal(s string) string {

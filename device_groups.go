@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	light_panel "github.com/slidebolt/sdk-entities/light_panel"
 	light_strip "github.com/slidebolt/sdk-entities/light_strip"
 	"github.com/slidebolt/sdk-types"
 )
@@ -22,15 +23,24 @@ func groupsDevice() types.Device {
 
 // automationMeta holds the parsed JSON blob stored in entity.Meta["PluginAutomation:<group>"].
 type automationMeta struct {
-	Domain string `json:"domain,omitempty"`
-	Index  *int   `json:"index,omitempty"`
-	Row    *int   `json:"row,omitempty"`
-	Col    *int   `json:"col,omitempty"`
+	Domain  string `json:"domain,omitempty"`
+	Index   *int   `json:"index,omitempty"`
+	PanelID *int   `json:"panel_id,omitempty"`
+	Row     *int   `json:"row,omitempty"`
+	Col     *int   `json:"col,omitempty"`
 }
 
 // stripMember records a single positional member of a light_strip virtual entity.
 type stripMember struct {
 	Index    int    `json:"index"`
+	PluginID string `json:"plugin_id"`
+	DeviceID string `json:"device_id"`
+	EntityID string `json:"entity_id"`
+}
+
+// panelMember records a single panel member of a light_panel virtual entity.
+type panelMember struct {
+	PanelID  int    `json:"panel_id"`
 	PluginID string `json:"plugin_id"`
 	DeviceID string `json:"device_id"`
 	EntityID string `json:"entity_id"`
@@ -55,6 +65,7 @@ func buildAutoGroups(matches []types.Entity, log *slog.Logger) ([]types.Entity, 
 	type groupAccumulator struct {
 		broadcast *broadcastSample
 		strip     []stripMember
+		panel     []panelMember
 	}
 
 	accumulators := map[string]*groupAccumulator{}
@@ -93,7 +104,15 @@ func buildAutoGroups(matches []types.Entity, log *slog.Logger) ([]types.Entity, 
 				}
 			}
 
-			if meta.Index != nil {
+			if meta.PanelID != nil {
+				// Panel member → contributes to a panel group.
+				acc.panel = append(acc.panel, panelMember{
+					PanelID:  *meta.PanelID,
+					PluginID: m.PluginID,
+					DeviceID: m.DeviceID,
+					EntityID: m.ID,
+				})
+			} else if meta.Index != nil {
 				// Positional member → contributes to a strip group.
 				acc.strip = append(acc.strip, stripMember{
 					Index:    *meta.Index,
@@ -138,7 +157,40 @@ func buildAutoGroups(matches []types.Entity, log *slog.Logger) ([]types.Entity, 
 	for _, name := range names {
 		acc := accumulators[name]
 
-		if len(acc.strip) > 0 {
+		if len(acc.panel) > 0 {
+			// Panel group: at least one panel member.
+			members := make([]panelMember, len(acc.panel))
+			copy(members, acc.panel)
+			sort.Slice(members, func(i, j int) bool {
+				return members[i].PanelID < members[j].PanelID
+			})
+			membersJSON, err := json.Marshal(members)
+			if err != nil {
+				return nil, fmt.Errorf("marshal panel_members for %q: %w", name, err)
+			}
+			out = append(out, types.Entity{
+				ID:        "group-" + normalizeID(name),
+				DeviceID:  "groups",
+				Domain:    light_panel.Type,
+				LocalName: name,
+				Actions:   light_panel.SupportedActions(),
+				Labels: map[string][]string{
+					"Group":                {name},
+					"virtual_source_query": {fmt.Sprintf("?label=PluginAutomation:%s", name)},
+				},
+				Meta: map[string]json.RawMessage{
+					"panel_members": membersJSON,
+				},
+				CommandQuery: &types.SearchQuery{
+					Labels: map[string][]string{"PluginAutomation": {name}},
+				},
+				CommandFilter: light_panel.BroadcastActions(),
+				Data: types.EntityData{
+					SyncStatus: types.SyncStatusSynced,
+					UpdatedAt:  time.Now().UTC(),
+				},
+			})
+		} else if len(acc.strip) > 0 {
 			// Strip group: at least one positional member.
 			members := make([]stripMember, len(acc.strip))
 			copy(members, acc.strip)

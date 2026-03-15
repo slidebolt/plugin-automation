@@ -1,6 +1,6 @@
 //go:build integration
 
-//go:build test_multi
+
 
 // Multi-plugin integration tests for plugin-automation.
 // These require no hardware and are safe to run in CI.

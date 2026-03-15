@@ -7,26 +7,21 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/slidebolt/plugin-automation/snippets"
 	"github.com/slidebolt/sdk-entities/light_panel"
 	"github.com/slidebolt/sdk-entities/light_strip"
 	runner "github.com/slidebolt/sdk-runner"
 	"github.com/slidebolt/sdk-types"
 )
 
-// PluginAutomationPlugin implements the runner.Plugin interface.
-// It manages two virtual devices (core management + automation groups) and keeps
-// group entities in sync with the registry via NATS entity-change events,
-// debounced to coalesce rapid saves.
 type PluginAutomationPlugin struct {
 	pctx        runner.PluginContext
 	logger      *slog.Logger
 	stop        chan struct{}
 	done        chan struct{}
-	trigRefresh chan struct{} // debounce signal; closed on Stop
+	trigRefresh chan struct{}
 }
 
-// Initialize registers the core and groups devices/entities, then runs the first
-// group sync. Called once before Start.
 func (p *PluginAutomationPlugin) Initialize(ctx runner.PluginContext) (types.Manifest, error) {
 	p.pctx = ctx
 	p.logger = ctx.Logger
@@ -49,6 +44,27 @@ func (p *PluginAutomationPlugin) Initialize(ctx runner.PluginContext) (types.Man
 		p.log().Warn("initialize: initial group refresh failed", "err", err)
 	}
 
+	if err := ctx.Registry.SaveDevice(scriptsDevice()); err != nil {
+		return types.Manifest{}, fmt.Errorf("upsert scripts device: %w", err)
+	}
+	for _, ent := range scriptsEntities() {
+		if err := ctx.Registry.SaveEntity(ent); err != nil {
+			return types.Manifest{}, fmt.Errorf("upsert scripts entity %s: %w", ent.ID, err)
+		}
+		if ent.ID == "lightstripscenes" {
+			if source, ok := snippets.Builtins()["LightStripScenes"]; ok {
+				if err := ctx.Registry.SaveScript(types.Script{
+					PluginID: "plugin-automation",
+					DeviceID: "scripts",
+					EntityID: "lightstripscenes",
+					Source:   source,
+				}); err != nil {
+					return types.Manifest{}, fmt.Errorf("upsert scripts script: %w", err)
+				}
+			}
+		}
+	}
+
 	return types.Manifest{
 		ID:      "plugin-automation",
 		Name:    "Plugin Automation",
@@ -57,15 +73,12 @@ func (p *PluginAutomationPlugin) Initialize(ctx runner.PluginContext) (types.Man
 	}, nil
 }
 
-// Start launches the background group-refresh loop and subscribes to registry
-// entity-change events so groups are rebuilt reactively rather than on a slow poll.
 func (p *PluginAutomationPlugin) Start(_ context.Context) error {
 	p.stop = make(chan struct{})
 	p.done = make(chan struct{})
 	p.trigRefresh = make(chan struct{}, 1)
 
 	unsubscribe, err := p.pctx.Registry.OnEntityChanged(func() {
-		// Non-blocking send: coalesce rapid bursts into one refresh.
 		select {
 		case p.trigRefresh <- struct{}{}:
 		default:
@@ -79,7 +92,6 @@ func (p *PluginAutomationPlugin) Start(_ context.Context) error {
 	return nil
 }
 
-// Stop signals the background loop and waits for it to exit.
 func (p *PluginAutomationPlugin) Stop() error {
 	if p.stop != nil {
 		close(p.stop)
@@ -92,11 +104,9 @@ func (p *PluginAutomationPlugin) runRefreshLoop(unsubscribe func()) {
 	defer close(p.done)
 	defer unsubscribe()
 
-	// Safety-net ticker: catches any edge cases missed by the event subscription.
 	safetyticker := time.NewTicker(5 * time.Minute)
 	defer safetyticker.Stop()
 
-	// Debounce timer: fires 500 ms after the last entity-change signal.
 	debounce := time.NewTimer(0)
 	if !debounce.Stop() {
 		<-debounce.C
@@ -125,8 +135,6 @@ func (p *PluginAutomationPlugin) runRefreshLoop(unsubscribe func()) {
 	}
 }
 
-// OnReset deletes all persisted devices and entities so a subsequent restart
-// re-creates only the canonical set from scratch.
 func (p *PluginAutomationPlugin) OnReset() error {
 	if p.pctx.Registry == nil {
 		return nil
@@ -152,14 +160,12 @@ func (p *PluginAutomationPlugin) OnReset() error {
 	return p.pctx.Registry.DeleteState()
 }
 
-// OnCommand handles commands for virtual group entities owned by plugin-automation.
-// Broadcast commands (turn_on, set_rgb, etc.) are routed via CommandQuery fan-out
-// by the gateway and never reach here. Only commands excluded from CommandFilter
-// — specifically set_segment for light_strip entities — are dispatched here for
-// positional translation to the correct physical entity.
 func (p *PluginAutomationPlugin) OnCommand(cmd types.Command, entity types.Entity) error {
 	switch entity.Domain {
 	case light_strip.Type:
+		if entity.DeviceID == "scripts" && entity.ID == "lightstripscenes" {
+			return nil
+		}
 		return p.handleStripCommand(cmd, entity)
 	case light_panel.Type:
 		return p.handlePanelCommand(cmd, entity)
@@ -182,8 +188,6 @@ func (p *PluginAutomationPlugin) handleStripCommand(cmd types.Command, entity ty
 		return err
 	}
 	if c.Type != light_strip.ActionSetSegment {
-		// Broadcast commands (filtered out of CommandFilter) should not reach here,
-		// but guard defensively.
 		return nil
 	}
 	if c.Segment == nil {
@@ -228,7 +232,6 @@ func (p *PluginAutomationPlugin) handleStripCommand(cmd types.Command, entity ty
 	})
 }
 
-// loadStripMembers unmarshals the strip_members meta blob from a light_strip entity.
 func loadStripMembers(entity types.Entity) ([]stripMember, error) {
 	raw, ok := entity.Meta["strip_members"]
 	if !ok {
@@ -258,12 +261,10 @@ func (p *PluginAutomationPlugin) handlePanelCommand(cmd types.Command, entity ty
 	if c.Panel == nil {
 		return fmt.Errorf("set_panel: panel is required")
 	}
-
 	members, err := loadPanelMembers(entity)
 	if err != nil {
 		return err
 	}
-
 	var target *panelMember
 	for i := range members {
 		if members[i].PanelID == c.Panel.ID {
@@ -272,17 +273,12 @@ func (p *PluginAutomationPlugin) handlePanelCommand(cmd types.Command, entity ty
 		}
 	}
 	if target == nil {
-		return fmt.Errorf("set_panel: no member with panel_id %d", c.Panel.ID)
-	}
-
-	if len(c.Panel.RGB) != 3 {
-		return fmt.Errorf("set_panel: rgb[3] required")
+		return fmt.Errorf("set_panel: no member with id %d", c.Panel.ID)
 	}
 	payload, err := json.Marshal(map[string]any{"type": "set_rgb", "rgb": c.Panel.RGB})
 	if err != nil {
 		return err
 	}
-
 	return p.pctx.Commands.SendCommand(types.Command{
 		ID:         cmd.ID + "-panel",
 		PluginID:   target.PluginID,
@@ -293,7 +289,6 @@ func (p *PluginAutomationPlugin) handlePanelCommand(cmd types.Command, entity ty
 	})
 }
 
-// loadPanelMembers unmarshals the panel_members meta blob from a light_panel entity.
 func loadPanelMembers(entity types.Entity) ([]panelMember, error) {
 	raw, ok := entity.Meta["panel_members"]
 	if !ok {
@@ -306,8 +301,6 @@ func loadPanelMembers(entity types.Entity) ([]panelMember, error) {
 	return members, nil
 }
 
-// refreshGroups queries the registry for PluginAutomation labels and upserts
-// the derived group entities into the groups device.
 func (p *PluginAutomationPlugin) refreshGroups() error {
 	var groups []types.Entity
 	if p.pctx.Registry != nil {

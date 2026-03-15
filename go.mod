@@ -5,10 +5,10 @@ go 1.25.7
 require (
 	github.com/cucumber/godog v0.15.1
 	github.com/nats-io/nats.go v1.49.0
-	github.com/slidebolt/registry v0.0.2
-	github.com/slidebolt/sdk-entities v1.20.2
-	github.com/slidebolt/sdk-integration-testing v0.0.4
-	github.com/slidebolt/sdk-runner v1.20.4
+	github.com/slidebolt/registry v0.0.5
+	github.com/slidebolt/sdk-entities v1.20.4
+	github.com/slidebolt/sdk-integration-testing v0.0.5
+	github.com/slidebolt/sdk-runner v1.20.6
 	github.com/slidebolt/sdk-types v1.20.7
 	github.com/stretchr/testify v1.11.1
 )
@@ -33,13 +33,3 @@ require (
 	golang.org/x/sys v0.42.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-replace github.com/slidebolt/sdk-types => ../sdk-types
-
-replace github.com/slidebolt/registry => ../registry
-
-replace github.com/slidebolt/sdk-entities => ../sdk-entities
-
-replace github.com/slidebolt/sdk-integration-testing => ../sdk-integration-testing
-
-replace github.com/slidebolt/sdk-runner => ../sdk-runner

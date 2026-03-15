@@ -61,7 +61,7 @@ func TestOnCommand_LightStrip_SetSegment_Dispatches(t *testing.T) {
 		{Index: 1, PluginID: "plugin-esphome", DeviceID: "bridge", EntityID: "led-1"},
 	})
 	cmd := makeCommand(map[string]any{
-		"type": "set_segment",
+		"type":    "set_segment",
 		"segment": map[string]any{"index": 1, "rgb": []int{255, 128, 0}},
 	})
 

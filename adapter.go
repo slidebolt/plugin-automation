@@ -7,9 +7,9 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/slidebolt/sdk-entities/light_strip"
 	runner "github.com/slidebolt/sdk-runner"
 	"github.com/slidebolt/sdk-types"
-	"github.com/slidebolt/sdk-entities/light_strip"
 )
 
 // PluginAutomationPlugin implements the runner.Plugin interface.

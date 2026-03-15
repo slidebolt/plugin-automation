@@ -23,9 +23,9 @@ func makeMetaRaw(v any) json.RawMessage {
 
 func TestBuildAutoGroupsWithMeta(t *testing.T) {
 	tests := []struct {
-		name   string
-		input  []types.Entity
-		check  func(t *testing.T, groups []types.Entity, err error)
+		name  string
+		input []types.Entity
+		check func(t *testing.T, groups []types.Entity, err error)
 	}{
 		{
 			name: "no meta infers domain from entity",

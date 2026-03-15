@@ -52,11 +52,11 @@ func TestIntegration_CoreDevicesPresent(t *testing.T) {
 // command arrives on NATS for the correct physical entity.
 func TestIntegration_SetSegment_Dispatch(t *testing.T) {
 	const (
-		leafPluginID = "plugin-test-clean"
-		leafDeviceID = "test-strip-device"
-		entity0ID    = "strip-light-0"
-		entity1ID    = "strip-light-1"
-		groupName    = "BasementLS"
+		leafPluginID  = "plugin-test-clean"
+		leafDeviceID  = "test-strip-device"
+		entity0ID     = "strip-light-0"
+		entity1ID     = "strip-light-1"
+		groupName     = "BasementLS"
 		stripEntityID = "group-basementls"
 		stripDeviceID = "groups"
 	)

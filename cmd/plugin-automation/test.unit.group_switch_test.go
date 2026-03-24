@@ -7,7 +7,7 @@ import (
 
 	automationapp "github.com/slidebolt/plugin-automation/app"
 	domain "github.com/slidebolt/sb-domain"
-	managersdk "github.com/slidebolt/sb-manager-sdk"
+	testkit "github.com/slidebolt/sb-testkit"
 	messenger "github.com/slidebolt/sb-messenger-sdk"
 	scriptserver "github.com/slidebolt/sb-script/server"
 	storage "github.com/slidebolt/sb-storage-sdk"
@@ -267,15 +267,15 @@ type receivedCommand struct {
 	action    string
 }
 
-func groupSwitchEnv(t *testing.T) (*managersdk.TestEnv, storage.Storage, messenger.Messenger) {
+func groupSwitchEnv(t *testing.T) (*testkit.TestEnv, storage.Storage, messenger.Messenger) {
 	t.Helper()
-	e := managersdk.NewTestEnv(t)
+	e := testkit.NewTestEnv(t)
 	e.Start("messenger")
 	e.Start("storage")
 	return e, e.Storage(), e.Messenger()
 }
 
-func startAutomationPlugin(t *testing.T, e *managersdk.TestEnv) *automationapp.App {
+func startAutomationPlugin(t *testing.T, e *testkit.TestEnv) *automationapp.App {
 	t.Helper()
 	svc := automationapp.New()
 	_, err := svc.OnStart(map[string]json.RawMessage{
@@ -289,7 +289,7 @@ func startAutomationPlugin(t *testing.T, e *managersdk.TestEnv) *automationapp.A
 	return svc
 }
 
-func startScriptServer(t *testing.T, e *managersdk.TestEnv, store storage.Storage) *scriptserver.Service {
+func startScriptServer(t *testing.T, e *testkit.TestEnv, store storage.Storage) *scriptserver.Service {
 	t.Helper()
 	scriptMsg, err := messenger.Connect(map[string]json.RawMessage{
 		"messenger": e.MessengerPayload(),

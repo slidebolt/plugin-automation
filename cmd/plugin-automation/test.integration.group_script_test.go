@@ -8,7 +8,7 @@ import (
 
 	automationapp "github.com/slidebolt/plugin-automation/app"
 	domain "github.com/slidebolt/sb-domain"
-	managersdk "github.com/slidebolt/sb-manager-sdk"
+	testkit "github.com/slidebolt/sb-testkit"
 	messenger "github.com/slidebolt/sb-messenger-sdk"
 	scriptserver "github.com/slidebolt/sb-script/server"
 	storage "github.com/slidebolt/sb-storage-sdk"
@@ -100,10 +100,10 @@ func TestGroup_ScriptStopAll_StopsOverlappingHallwayScript(t *testing.T) {
 	}
 }
 
-func groupScriptEnv(t *testing.T) (*managersdk.TestEnv, storage.Storage, messenger.Messenger, *messenger.Commands) {
+func groupScriptEnv(t *testing.T) (*testkit.TestEnv, storage.Storage, messenger.Messenger, *messenger.Commands) {
 	t.Helper()
 
-	e := managersdk.NewTestEnv(t)
+	e := testkit.NewTestEnv(t)
 	e.Start("messenger")
 	e.Start("storage")
 

@@ -132,6 +132,7 @@ func TestLightGroup_DiscoveredMembersPreserveState(t *testing.T) {
 // updates the group state to reflect the member's new state.
 func TestLightGroup_CommandUpdatesState(t *testing.T) {
 	e, store, cmds := env(t)
+	e.Start("sb-virtual") // fan-out is handled by sb-virtual, not plugin-automation
 
 	// Seed light members.
 	saveEntityWithMeta(t, store, "test", "dev1", "led0", "light", "LED 0",
@@ -181,6 +182,7 @@ func TestLightGroup_CommandUpdatesState(t *testing.T) {
 // does NOT overwrite reactive state aggregated from members via Watch.
 func TestLightGroup_RediscoveryResetsCommandState(t *testing.T) {
 	e, store, cmds := env(t)
+	e.Start("sb-virtual") // fan-out is handled by sb-virtual, not plugin-automation
 
 	saveEntityWithMeta(t, store, "test", "dev1", "led0", "light", "LED 0",
 		domain.Light{Power: false, Brightness: 100},

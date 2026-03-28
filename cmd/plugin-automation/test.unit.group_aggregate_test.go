@@ -114,6 +114,44 @@ func TestAggregateLightState_Empty(t *testing.T) {
 	}
 }
 
+func TestLightGroup_ColorTempOnlyCommandsOmitRGB(t *testing.T) {
+	e, store, _ := env(t)
+
+	for i, id := range []string{"back01", "center", "back02"} {
+		meta := mustMarshalRaw(t, map[string]any{"position": i, "entity": "light"})
+		e := saveEntityWithMeta(t, store, "plugin-esphome", "movieroom", id, "light", "Bulb",
+			domain.Light{Power: false, Brightness: 88, ColorMode: "cold_warm_white", Temperature: 370, White: 255},
+			map[string][]string{"PluginAutomation": {"BasementMovieRoomEdison"}},
+			map[string]json.RawMessage{"PluginAutomation:BasementMovieRoomEdison": meta},
+		)
+		e.Commands = []string{"light_turn_on", "light_turn_off", "light_set_brightness", "light_set_color_temp", "light_set_rgb"}
+		if err := store.Save(e); err != nil {
+			t.Fatalf("resave %s: %v", id, err)
+		}
+	}
+
+	svc := startAutomationPlugin(t, e)
+	_ = svc
+	time.Sleep(500 * time.Millisecond)
+
+	raw := loadGroupRaw(t, store, "basementmovieroomedison")
+	var got struct {
+		Commands []string `json:"commands"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal group: %v", err)
+	}
+	want := []string{"light_turn_on", "light_turn_off", "light_set_brightness", "light_set_color_temp", "script_run", "script_stop_all"}
+	if len(got.Commands) != len(want) {
+		t.Fatalf("commands = %v, want %v", got.Commands, want)
+	}
+	for i := range want {
+		if got.Commands[i] != want[i] {
+			t.Fatalf("commands = %v, want %v", got.Commands, want)
+		}
+	}
+}
+
 // --- Integration test: group aggregates from real member entities ---
 
 func TestLightGroup_AggregatesFromMemberState(t *testing.T) {

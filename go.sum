@@ -123,6 +123,8 @@ github.com/slidebolt/sb-storage-server v1.0.2 h1:PGV1WdjRPgR/u031nGJcpNEht+u150f
 github.com/slidebolt/sb-storage-server v1.0.2/go.mod h1:4/uC1mW0hhM9z8f9w+RyDJVtZtqNjVcc6T2wxpENvn4=
 github.com/slidebolt/sb-testkit v1.0.2 h1:G3uJBIHKWtzK83TQbxk7sQZwgLhMWBE+XhNWpGpZOHc=
 github.com/slidebolt/sb-testkit v1.0.2/go.mod h1:ZWGseEYvWJZiW9mSWAPPQgI/Gr0ujauF+1Z1gt05J3M=
+github.com/slidebolt/sb-virtual v1.0.2 h1:ppz7lpiGbluh3rrWP6wS6+wYSgZ4ak2PLmwAhDcrt2U=
+github.com/slidebolt/sb-virtual v1.0.2/go.mod h1:IruelfMhM7CIrY/fZVUsq4DPKQw1ym3cH5hff0009+8=
 github.com/spf13/cobra v1.7.0/go.mod h1:uLxZILRyS/50WlhOIKD7W6V5bgeIt+4sICxh6uRMrb0=
 github.com/spf13/pflag v1.0.5/go.mod h1:McXfInJRrz4CZXVZOBLb0bTZqETkiAhM9Iw0y3An2Bg=
 github.com/spf13/pflag v1.0.7/go.mod h1:McXfInJRrz4CZXVZOBLb0bTZqETkiAhM9Iw0y3An2Bg=

@@ -297,7 +297,7 @@ func (a *App) discoverGroups() error {
 		case "light_strip":
 			groupEntity = createLightStripEntity(groupID, groupName, targets, targetJSON)
 		case "light":
-			groupEntity = createLightEntity(groupID, groupName, targets, targetJSON)
+			groupEntity = createLightEntity(groupID, groupName, members, targets, targetJSON)
 		case "switch":
 			groupEntity = createSwitchEntity(groupID, groupName, targets, targetJSON)
 		default:
@@ -612,14 +612,62 @@ func createLightStripEntity(groupID, groupName string, targets []string, targetJ
 	}
 }
 
-func createLightEntity(groupID, groupName string, targets []string, targetJSON json.RawMessage) domain.Entity {
+func createLightEntity(groupID, groupName string, members []positionedEntity, targets []string, targetJSON json.RawMessage) domain.Entity {
 	return domain.Entity{
 		ID: groupID, Plugin: PluginID, DeviceID: "group", Type: "light", Name: groupName,
-		Commands: []string{"light_turn_on", "light_turn_off", "light_set_brightness", "light_set_rgb", "light_set_color_temp", "script_run", "script_stop_all"},
+		Commands: groupLightCommands(members),
 		State:    domain.Light{Power: false},
 		Target:   targetJSON,
 		Labels:   map[string][]string{"group_type": {"light"}},
 	}
+}
+
+func groupLightCommands(members []positionedEntity) []string {
+	cmds := []string{"light_turn_on", "light_turn_off", "light_set_brightness"}
+	if groupSupportsColorTemperature(members) {
+		cmds = append(cmds, "light_set_color_temp")
+	}
+	if groupSupportsRGB(members) {
+		cmds = append(cmds, "light_set_rgb")
+	}
+	cmds = append(cmds, "script_run", "script_stop_all")
+	return cmds
+}
+
+func groupSupportsColorTemperature(members []positionedEntity) bool {
+	for _, member := range members {
+		for _, cmd := range member.entity.Commands {
+			if cmd == "light_set_color_temp" {
+				return true
+			}
+		}
+		if light, ok := member.entity.State.(domain.Light); ok {
+			if light.Temperature > 0 || light.ColorMode == "color_temp" || light.ColorMode == "cold_warm_white" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func groupSupportsRGB(members []positionedEntity) bool {
+	for _, member := range members {
+		light, ok := member.entity.State.(domain.Light)
+		hasStateRGB := ok && (len(light.RGB) == 3 || len(light.RGBW) == 4 || len(light.RGBWW) == 5 || strings.HasPrefix(light.ColorMode, "rgb"))
+		if hasStateRGB {
+			return true
+		}
+		if ok && (light.ColorMode == "color_temp" || light.ColorMode == "cold_warm_white") && light.Temperature > 0 {
+			continue
+		}
+		for _, cmd := range member.entity.Commands {
+			switch cmd {
+			case "light_set_rgb", "light_set_rgbw", "light_set_rgbww":
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func createSwitchEntity(groupID, groupName string, targets []string, targetJSON json.RawMessage) domain.Entity {
@@ -647,41 +695,31 @@ func NormalizeGroupID(name string) string {
 	return result.String()
 }
 
+// handleCommand processes incoming commands for entities managed by plugin-automation.
 func (a *App) handleCommand(addr messenger.Address, cmd any) {
 	switch c := cmd.(type) {
 	case domain.LightTurnOn:
 		log.Printf("plugin-automation: light %s turn_on", addr.Key())
-		a.fanOutCommand(addr, "light_turn_on", c)
 	case domain.LightTurnOff:
 		log.Printf("plugin-automation: light %s turn_off transition=%v", addr.Key(), c.Transition)
-		a.fanOutCommand(addr, "light_turn_off", c)
 	case domain.LightSetBrightness:
 		log.Printf("plugin-automation: light %s set_brightness brightness=%d", addr.Key(), c.Brightness)
-		a.fanOutCommand(addr, "light_set_brightness", c)
 	case domain.LightSetColorTemp:
 		log.Printf("plugin-automation: light %s set_color_temp mireds=%d", addr.Key(), c.Mireds)
-		a.fanOutCommand(addr, "light_set_color_temp", c)
 	case domain.LightSetRGB:
 		log.Printf("plugin-automation: light %s set_rgb r=%d g=%d b=%d", addr.Key(), c.R, c.G, c.B)
-		a.fanOutCommand(addr, "light_set_rgb", c)
 	case domain.LightSetRGBW:
 		log.Printf("plugin-automation: light %s set_rgbw r=%d g=%d b=%d w=%d", addr.Key(), c.R, c.G, c.B, c.W)
-		a.fanOutCommand(addr, "light_set_rgbw", c)
 	case domain.LightSetRGBWW:
 		log.Printf("plugin-automation: light %s set_rgbww r=%d g=%d b=%d cw=%d ww=%d", addr.Key(), c.R, c.G, c.B, c.CW, c.WW)
-		a.fanOutCommand(addr, "light_set_rgbww", c)
 	case domain.LightSetHS:
 		log.Printf("plugin-automation: light %s set_hs hue=%.1f sat=%.1f", addr.Key(), c.Hue, c.Saturation)
-		a.fanOutCommand(addr, "light_set_hs", c)
 	case domain.LightSetXY:
 		log.Printf("plugin-automation: light %s set_xy x=%.4f y=%.4f", addr.Key(), c.X, c.Y)
-		a.fanOutCommand(addr, "light_set_xy", c)
 	case domain.LightSetWhite:
 		log.Printf("plugin-automation: light %s set_white white=%d", addr.Key(), c.White)
-		a.fanOutCommand(addr, "light_set_white", c)
 	case domain.LightSetEffect:
 		log.Printf("plugin-automation: light %s set_effect effect=%s", addr.Key(), c.Effect)
-		a.fanOutCommand(addr, "light_set_effect", c)
 	case domain.SwitchTurnOn:
 		log.Printf("plugin-automation: switch %s turn_on", addr.Key())
 	case domain.SwitchTurnOff:
@@ -728,31 +766,6 @@ func (a *App) handleCommand(addr messenger.Address, cmd any) {
 		}
 	default:
 		log.Printf("plugin-automation: unknown command %T for %s", cmd, addr.Key())
-	}
-}
-
-// fanOutCommand resolves the group's member entities and publishes the
-// command to each one, so the actual devices execute the action.
-func (a *App) fanOutCommand(addr messenger.Address, commandName string, payload any) {
-	key := domain.EntityKey{Plugin: addr.Plugin, DeviceID: addr.DeviceID, ID: addr.EntityID}
-	raw, err := a.store.Get(key)
-	if err != nil {
-		return
-	}
-	var group domain.Entity
-	if err := json.Unmarshal(raw, &group); err != nil {
-		return
-	}
-	memberKeys, err := a.resolveGroupMemberKeys(group)
-	if err != nil {
-		return
-	}
-	data, _ := json.Marshal(payload)
-	for mk := range memberKeys {
-		subject := mk + ".command." + commandName
-		if err := a.msg.Publish(subject, data); err != nil {
-			log.Printf("plugin-automation: fan-out %s to %s: %v", commandName, mk, err)
-		}
 	}
 }
 

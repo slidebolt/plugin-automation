@@ -11,6 +11,7 @@ require (
 	github.com/slidebolt/sb-script v1.0.2
 	github.com/slidebolt/sb-storage-sdk v1.0.2
 	github.com/slidebolt/sb-testkit v1.0.2
+	github.com/slidebolt/sb-virtual v1.0.2
 )
 
 require (

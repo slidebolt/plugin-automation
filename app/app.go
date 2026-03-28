@@ -6,6 +6,7 @@ import (
 	"log"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	contract "github.com/slidebolt/sb-contract"
@@ -115,6 +116,7 @@ type App struct {
 	// groupWatchers tracks storage.Watch instances per group ID.
 	// Each watcher monitors the group's member query and aggregates
 	// member states into the group entity on every change.
+	groupMu       sync.RWMutex
 	groupWatchers map[string]*storage.Watcher
 }
 
@@ -198,7 +200,11 @@ func (a *App) OnShutdown() error {
 	for _, sub := range a.controlSubs {
 		sub.Unsubscribe()
 	}
-	for _, w := range a.groupWatchers {
+	a.groupMu.Lock()
+	watchers := a.groupWatchers
+	a.groupWatchers = make(map[string]*storage.Watcher)
+	a.groupMu.Unlock()
+	for _, w := range watchers {
 		w.Stop()
 	}
 	if a.store != nil {
@@ -486,8 +492,11 @@ func (a *App) watchGroup(group domain.Entity) {
 	if group.Type != "light" {
 		return
 	}
-	if _, ok := a.groupWatchers[group.ID]; ok {
-		return // already watching
+	a.groupMu.RLock()
+	_, alreadyWatching := a.groupWatchers[group.ID]
+	a.groupMu.RUnlock()
+	if alreadyWatching {
+		return
 	}
 
 	log.Printf("plugin-automation: watchGroup %s", group.Name)
@@ -502,7 +511,10 @@ func (a *App) watchGroup(group domain.Entity) {
 	a.aggregateAndSave(group, nil)
 
 	onChange := func(_ string, _ json.RawMessage) {
-		a.aggregateAndSave(group, a.groupWatchers[group.ID])
+		a.groupMu.RLock()
+		w := a.groupWatchers[group.ID]
+		a.groupMu.RUnlock()
+		a.aggregateAndSave(group, w)
 	}
 
 	w, err := storage.Watch(a.msg, targetQuery, storage.WatchHandlers{
@@ -515,7 +527,9 @@ func (a *App) watchGroup(group domain.Entity) {
 		return
 	}
 
+	a.groupMu.Lock()
 	a.groupWatchers[group.ID] = w
+	a.groupMu.Unlock()
 }
 
 // aggregateAndSave reads all member light states and saves the aggregate

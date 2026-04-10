@@ -1,16 +1,19 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	contract "github.com/slidebolt/sb-contract"
 	domain "github.com/slidebolt/sb-domain"
+	logging "github.com/slidebolt/sb-logging-sdk"
 	messenger "github.com/slidebolt/sb-messenger-sdk"
 	storage "github.com/slidebolt/sb-storage-sdk"
 )
@@ -104,6 +107,7 @@ type GroupState struct {
 type App struct {
 	msg      messenger.Messenger
 	store    storage.Storage
+	logger   logging.Store
 	cmds     *messenger.Commands
 	subs     []messenger.Subscription
 	ticker   *time.Ticker
@@ -119,6 +123,8 @@ type App struct {
 	groupMu       sync.RWMutex
 	groupWatchers map[string]*storage.Watcher
 }
+
+var logSequence uint64
 
 type scriptAPIResponse struct {
 	OK    bool   `json:"ok"`
@@ -138,7 +144,12 @@ func init() {
 }
 
 func New() *App {
+	return NewWithLogger(nil)
+}
+
+func NewWithLogger(logger logging.Store) *App {
 	return &App{
+		logger:        logger,
 		controlSubs:   make(map[string]messenger.Subscription),
 		groupWatchers: make(map[string]*storage.Watcher),
 	}
@@ -165,11 +176,18 @@ func (a *App) OnStart(deps map[string]json.RawMessage) (json.RawMessage, error) 
 		return nil, fmt.Errorf("connect storage: %w", err)
 	}
 	a.store = store
+	if a.logger == nil {
+		if logger, err := logging.Connect(deps); err == nil {
+			a.logger = logger
+		} else {
+			log.Printf("plugin-automation: logging connect failed: %v", err)
+		}
+	}
 
 	domain.Register("group", GroupState{})
 
 	a.cmds = messenger.NewCommands(msg, domain.LookupCommand)
-	sub, err := a.cmds.Receive(PluginID+".>", a.handleCommand)
+	sub, err := a.cmds.ReceiveMessage(PluginID+".>", a.handleCommandMessage)
 	if err != nil {
 		return nil, fmt.Errorf("subscribe commands: %w", err)
 	}
@@ -436,7 +454,7 @@ func (a *App) subscribeControl(controlKey string, group domain.Entity) {
 			log.Printf("plugin-automation: control entity %s has unrecognized type %s", controlKey, ent.Type)
 			return
 		}
-		a.handleControlChange(group, on)
+		a.handleControlChange(group, on, m.Headers)
 	})
 	if err != nil {
 		log.Printf("plugin-automation: failed to subscribe to control entity %s: %v", controlKey, err)
@@ -447,9 +465,16 @@ func (a *App) subscribeControl(controlKey string, group domain.Entity) {
 }
 
 // handleControlChange stops running scripts and forwards on/off to light members.
-func (a *App) handleControlChange(group domain.Entity, on bool) {
+func (a *App) handleControlChange(group domain.Entity, on bool, headers messenger.Headers) {
+	traceID := messenger.TraceID(headers)
+	a.appendLog("control.triggered", "info", "group control triggered", messenger.Address{
+		Plugin:   group.Plugin,
+		DeviceID: group.DeviceID,
+		EntityID: group.ID,
+	}, nil, traceID, map[string]any{"power": on})
+
 	// Stop any running scripts targeting this group's members.
-	if err := a.stopAllScriptsMatchingGroup(group); err != nil {
+	if err := a.stopAllScriptsMatchingGroup(group, traceID); err != nil {
 		log.Printf("plugin-automation: control stop scripts for %s: %v", group.Key(), err)
 	}
 
@@ -479,9 +504,16 @@ func (a *App) handleControlChange(group domain.Entity, on bool) {
 			continue
 		}
 		subject := key + ".command." + cmd
-		if err := a.msg.Publish(subject, []byte("{}")); err != nil {
+		outHeaders := messenger.WithOrigin(headers, PluginID, group.Key(), cmd)
+		if err := a.msg.PublishWithHeaders(subject, []byte("{}"), outHeaders); err != nil {
 			log.Printf("plugin-automation: control forward %s to %s: %v", cmd, key, err)
+			continue
 		}
+		a.appendLog("control.forwarded", "info", "group control forwarded command", messenger.Address{
+			Plugin:   group.Plugin,
+			DeviceID: group.DeviceID,
+			EntityID: group.ID,
+		}, nil, traceID, map[string]any{"recipient": key, "command": cmd})
 	}
 }
 
@@ -711,6 +743,19 @@ func NormalizeGroupID(name string) string {
 
 // handleCommand processes incoming commands for entities managed by plugin-automation.
 func (a *App) handleCommand(addr messenger.Address, cmd any) {
+	a.handleCommandWithTrace(addr, cmd, "")
+}
+
+func (a *App) handleCommandMessage(addr messenger.Address, cmd any, msg *messenger.Message) {
+	traceID := ""
+	if msg != nil {
+		traceID = messenger.TraceID(msg.Headers)
+	}
+	a.handleCommandWithTrace(addr, cmd, traceID)
+}
+
+func (a *App) handleCommandWithTrace(addr messenger.Address, cmd any, traceID string) {
+	a.appendLog("command.received", "info", "received command", addr, cmd, traceID, nil)
 	switch c := cmd.(type) {
 	case domain.LightTurnOn:
 		log.Printf("plugin-automation: light %s turn_on", addr.Key())
@@ -770,25 +815,58 @@ func (a *App) handleCommand(addr messenger.Address, cmd any) {
 		log.Printf("plugin-automation: climate %s set_temperature temp=%v", addr.Key(), c.Temperature)
 	case ScriptRun:
 		log.Printf("plugin-automation: group %s script_run name=%s", addr.Key(), c.Name)
-		if err := a.runScriptForGroup(addr, c.Name); err != nil {
+		if err := a.runScriptForGroup(addr, c.Name, traceID); err != nil {
 			log.Printf("plugin-automation: group %s script_run failed: %v", addr.Key(), err)
+			a.appendLog("script.run.failed", "error", fmt.Sprintf("script_run failed: %v", err), addr, cmd, traceID, map[string]any{"script_name": c.Name})
 		}
 	case ScriptStopAll:
 		log.Printf("plugin-automation: group %s script_stop_all", addr.Key())
-		if err := a.stopAllScriptsForGroup(addr); err != nil {
+		if err := a.stopAllScriptsForGroup(addr, traceID); err != nil {
 			log.Printf("plugin-automation: group %s script_stop_all failed: %v", addr.Key(), err)
+			a.appendLog("script.stop_all.failed", "error", fmt.Sprintf("script_stop_all failed: %v", err), addr, cmd, traceID, nil)
 		}
 	default:
 		log.Printf("plugin-automation: unknown command %T for %s", cmd, addr.Key())
 	}
 }
 
-func (a *App) runScriptForGroup(addr messenger.Address, name string) error {
+func (a *App) appendLog(kind, level, message string, addr messenger.Address, cmd any, traceID string, data map[string]any) {
+	if a == nil || a.logger == nil {
+		return
+	}
+	action := commandActionName(cmd)
+	event := logging.Event{
+		ID:      fmt.Sprintf("%s-%d", PluginID, atomic.AddUint64(&logSequence, 1)),
+		TS:      time.Now().UTC(),
+		Source:  PluginID,
+		Kind:    kind,
+		Level:   level,
+		Message: message,
+		Plugin:  addr.Plugin,
+		Device:  addr.DeviceID,
+		Entity:  addr.Key(),
+		Action:  action,
+		TraceID: traceID,
+		Data:    data,
+	}
+	if err := a.logger.Append(context.Background(), event); err != nil {
+		log.Printf("plugin-automation: append log failed: %v", err)
+	}
+}
+
+func commandActionName(cmd any) string {
+	if action, ok := cmd.(interface{ ActionName() string }); ok {
+		return action.ActionName()
+	}
+	return ""
+}
+
+func (a *App) runScriptForGroup(addr messenger.Address, name, traceID string) error {
 	group, err := a.loadGroupEntity(addr)
 	if err != nil {
 		return err
 	}
-	if err := a.stopAllScriptsMatchingGroup(group); err != nil {
+	if err := a.stopAllScriptsMatchingGroup(group, traceID); err != nil {
 		return err
 	}
 	queryRef, err := a.ensureGroupQueryRef(group)
@@ -798,11 +876,11 @@ func (a *App) runScriptForGroup(addr messenger.Address, name string) error {
 	_, err = a.requestScriptAPI("script.start", map[string]any{
 		"name":     name,
 		"queryRef": queryRef,
-	})
+	}, traceID)
 	return err
 }
 
-func (a *App) stopAllScriptsForGroup(addr messenger.Address) error {
+func (a *App) stopAllScriptsForGroup(addr messenger.Address, traceID string) error {
 	group, err := a.loadGroupEntity(addr)
 	if err != nil {
 		return err
@@ -813,18 +891,18 @@ func (a *App) stopAllScriptsForGroup(addr messenger.Address) error {
 	}
 	_, err = a.requestScriptAPI("script.stop_all", map[string]any{
 		"queryRef": queryRef,
-	})
+	}, traceID)
 	return err
 }
 
-func (a *App) stopAllScriptsMatchingGroup(group domain.Entity) error {
+func (a *App) stopAllScriptsMatchingGroup(group domain.Entity, traceID string) error {
 	queryRef, err := a.ensureGroupQueryRef(group)
 	if err != nil {
 		return err
 	}
 	_, err = a.requestScriptAPI("script.stop_all", map[string]any{
 		"queryRef": queryRef,
-	})
+	}, traceID)
 	return err
 }
 
@@ -909,12 +987,13 @@ func controlSignal(ent domain.Entity) (on bool, valid bool) {
 	return false, false
 }
 
-func (a *App) requestScriptAPI(subject string, body any) (*scriptAPIResponse, error) {
+func (a *App) requestScriptAPI(subject string, body any, traceID string) (*scriptAPIResponse, error) {
 	data, err := json.Marshal(body)
 	if err != nil {
 		return nil, fmt.Errorf("marshal %s: %w", subject, err)
 	}
-	respMsg, err := a.msg.Request(subject, data, 5*time.Second)
+	headers := messenger.WithOrigin(messenger.WithTraceID(nil, traceID), PluginID, subject, subject)
+	respMsg, err := a.msg.RequestWithHeaders(subject, data, headers, 5*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("%s request: %w", subject, err)
 	}

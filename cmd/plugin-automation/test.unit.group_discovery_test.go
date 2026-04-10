@@ -377,7 +377,6 @@ func TestGroupDiscovery_LabelValuesWithSpaces(t *testing.T) {
 	if len(targetQuery.Where) != 1 {
 		t.Fatalf("Expected 1 where clause, got %d", len(targetQuery.Where))
 	}
-
 	if targetQuery.Where[0].Value != "Master Bedroom" {
 		t.Errorf("Query value should be 'Master Bedroom', got %v", targetQuery.Where[0].Value)
 	}

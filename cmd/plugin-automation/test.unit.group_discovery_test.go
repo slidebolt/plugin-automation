@@ -2,17 +2,77 @@ package main
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/slidebolt/plugin-automation/app"
 	domain "github.com/slidebolt/sb-domain"
+	messenger "github.com/slidebolt/sb-messenger-sdk"
 	storage "github.com/slidebolt/sb-storage-sdk"
+	server "github.com/slidebolt/sb-storage-server"
 )
 
 // ==========================================================================
 // Comprehensive Group Discovery Tests
 // ==========================================================================
+
+func TestGroupDiscovery_OnStartWithZeroBytePersistedGroupState(t *testing.T) {
+	dir := t.TempDir()
+
+	groupDir := filepath.Join(dir, "plugin-automation", "group", "upstairsarea")
+	if err := os.MkdirAll(groupDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(groupDir, "upstairsarea.json"), []byte{}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(groupDir, "upstairsarea.profile.json"),
+		[]byte(`{"labels":{"PluginHomeassistant":["true"],"group_type":["light"]}}`),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	msg, payload, err := messenger.MockWithPayload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { msg.Close() })
+
+	serverMsg, err := messenger.Connect(map[string]json.RawMessage{
+		"messenger": payload,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { serverMsg.Close() })
+
+	handler, err := server.NewHandlerWithDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := handler.LoadFromDir(); err != nil {
+		t.Fatal(err)
+	}
+	if err := handler.Register(serverMsg); err != nil {
+		t.Fatal(err)
+	}
+	if err := serverMsg.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	automationSvc := app.New()
+	if _, err := automationSvc.OnStart(map[string]json.RawMessage{
+		"messenger": payload,
+		"storage":   nil,
+	}); err != nil {
+		t.Fatalf("start plugin-automation with zero-byte persisted group state: %v", err)
+	}
+	t.Cleanup(func() { _ = automationSvc.OnShutdown() })
+}
 
 // TestGroupDiscovery_AddEntityLater validates that when a new entity is added
 // after startup with a PluginAutomation label, the group is updated automatically

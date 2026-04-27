@@ -253,6 +253,16 @@ func (a *App) discoveryLoop() {
 }
 
 func (a *App) discoverGroups() error {
+	// Ensure the synthetic "group" device record exists. All automation
+	// group entities are children of this single device — it's the logical
+	// bucket that holds every user-defined group (basement, kitchen, …).
+	// Written idempotently on every discovery pass so a fresh install or
+	// a wiped data dir always gets it.
+	groupDevice := domain.Device{ID: "group", Plugin: PluginID, Name: "Automation Groups"}
+	if err := a.store.Save(groupDevice); err != nil {
+		return fmt.Errorf("save group device: %w", err)
+	}
+
 	allEntities, err := a.store.Query(storage.Query{
 		Pattern: ">",
 		Where: []storage.Filter{

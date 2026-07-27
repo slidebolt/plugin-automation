@@ -74,6 +74,53 @@ func TestGroupDiscovery_OnStartWithZeroBytePersistedGroupState(t *testing.T) {
 	t.Cleanup(func() { _ = automationSvc.OnShutdown() })
 }
 
+func TestGroupDiscovery_OnStartCreatesGroupFromLabelOnlyMembers(t *testing.T) {
+	testEnv, store, _ := env(t)
+
+	saveEntityWithLabels(t, store, "test", "dev1", "light1", "light", "Light 1",
+		domain.Light{Power: false}, map[string][]string{"PluginAutomation": {"Kitchen"}})
+	saveEntityWithLabels(t, store, "test", "dev1", "light2", "light", "Light 2",
+		domain.Light{Power: true}, map[string][]string{"PluginAutomation": {"Kitchen"}})
+
+	automationSvc := app.New()
+	if _, err := automationSvc.OnStart(map[string]json.RawMessage{
+		"messenger": testEnv.MessengerPayload(),
+		"storage":   testEnv.StoragePayload(),
+	}); err != nil {
+		t.Fatalf("start plugin-automation: %v", err)
+	}
+	t.Cleanup(func() { _ = automationSvc.OnShutdown() })
+
+	key := domain.EntityKey{Plugin: app.PluginID, DeviceID: "group", ID: "kitchen"}
+	var group domain.Entity
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		raw, err := store.Get(key)
+		if err == nil && json.Unmarshal(raw, &group) == nil && group.Type == "light" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("group %s was not created as a light group", key.Key())
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	var targetQuery storage.Query
+	if err := json.Unmarshal(group.Target, &targetQuery); err != nil {
+		t.Fatalf("decode target: %v", err)
+	}
+	members, err := store.Query(targetQuery)
+	if err != nil {
+		t.Fatalf("query members: %v", err)
+	}
+	if len(members) != 2 {
+		t.Fatalf("members: got %d want 2", len(members))
+	}
+	if group.Name != "Kitchen" {
+		t.Fatalf("name: got %q want Kitchen", group.Name)
+	}
+}
+
 // TestGroupDiscovery_AddEntityLater validates that when a new entity is added
 // after startup with a PluginAutomation label, the group is updated automatically
 // through background discovery

@@ -286,27 +286,32 @@ func (a *App) discoverGroups() error {
 		if labels, ok := entity.Labels["PluginAutomation"]; ok {
 			for _, groupName := range labels {
 				metaKey := "PluginAutomation:" + groupName
+				var meta struct {
+					Position int             `json:"position"`
+					Entity   string          `json:"entity"`
+					Control  json.RawMessage `json:"control"`
+				}
 				if metaRaw, ok := entity.Meta[metaKey]; ok {
-					var meta struct {
-						Position int             `json:"position"`
-						Entity   string          `json:"entity"`
-						Control  json.RawMessage `json:"control"`
-					}
 					if err := json.Unmarshal(metaRaw, &meta); err != nil {
 						log.Printf("plugin-automation: failed to unmarshal meta for %s: %v", entity.Key(), err)
 						continue
 					}
-					if meta.Entity != "" {
-						deviceKey := groupName + ":" + meta.Entity
-						groupConfigs[deviceKey] = append(groupConfigs[deviceKey], positionedEntity{entity: entity, position: meta.Position})
-					}
-					if isControlMeta(meta.Control) {
-						groupControls[groupName] = append(groupControls[groupName], entity.Key())
-					}
+				} else {
+					meta.Entity = entity.Type
+					meta.Position = len(groupConfigs[groupName+":"+meta.Entity])
+					log.Printf("plugin-automation: group %s member %s has no %s meta; defaulting entity_type=%s position=%d", groupName, entity.Key(), metaKey, meta.Entity, meta.Position)
+				}
+				if meta.Entity != "" {
+					deviceKey := groupName + ":" + meta.Entity
+					groupConfigs[deviceKey] = append(groupConfigs[deviceKey], positionedEntity{entity: entity, position: meta.Position})
+				}
+				if isControlMeta(meta.Control) {
+					groupControls[groupName] = append(groupControls[groupName], entity.Key())
 				}
 			}
 		}
 	}
+	log.Printf("plugin-automation: discovered %d PluginAutomation-labeled entities across %d group/type configs", len(allEntities), len(groupConfigs))
 
 	for deviceKey, members := range groupConfigs {
 		parts := strings.SplitN(deviceKey, ":", 2)
@@ -372,8 +377,9 @@ func (a *App) discoverGroups() error {
 		}
 		// Persist group labels in sidecar, merging with any existing
 		// sidecar labels (e.g. PluginHomeassistant) so we don't clobber
-		// user-set labels on every discovery cycle.
+		// user-set labels/profile data on every discovery cycle.
 		if len(groupEntity.Labels) > 0 {
+			profileData := map[string]any{}
 			mergedLabels := map[string][]string{}
 			if raw, err := a.store.Get(domain.EntityKey{Plugin: PluginID, DeviceID: "group", ID: groupID}); err == nil {
 				var existing domain.Entity
@@ -381,17 +387,24 @@ func (a *App) discoverGroups() error {
 					for k, v := range existing.Labels {
 						mergedLabels[k] = v
 					}
+					if existing.Meta != nil {
+						profileData["meta"] = existing.Meta
+					}
+					if existing.Profile != nil {
+						profileData["profile"] = existing.Profile
+					}
 				}
 			}
 			for k, v := range groupEntity.Labels {
 				mergedLabels[k] = v
 			}
-			profileData, _ := json.Marshal(map[string]any{"labels": mergedLabels})
-			if err := a.store.SetProfile(groupEntity, json.RawMessage(profileData)); err != nil {
+			profileData["labels"] = mergedLabels
+			rawProfileData, _ := json.Marshal(profileData)
+			if err := a.store.SetProfile(groupEntity, json.RawMessage(rawProfileData)); err != nil {
 				log.Printf("plugin-automation: failed to setprofile %s group %s: %v", entityType, groupName, err)
 			}
 		}
-		log.Printf("plugin-automation: %s %s updated with %d members", entityType, groupName, len(members))
+		log.Printf("plugin-automation: %s %s updated with %d members targets=%v labels=%v", entityType, groupName, len(members), targets, groupEntity.Labels)
 
 		// Subscribe to control entity state changes.
 		for _, ck := range controlKeys {
@@ -766,6 +779,7 @@ func (a *App) handleCommandMessage(addr messenger.Address, cmd any, msg *messeng
 
 func (a *App) handleCommandWithTrace(addr messenger.Address, cmd any, traceID string) {
 	a.appendLog("command.received", "info", "received command", addr, cmd, traceID, nil)
+	a.logGroupCommandTargets(addr, cmd)
 	switch c := cmd.(type) {
 	case domain.LightTurnOn:
 		log.Printf("plugin-automation: light %s turn_on", addr.Key())
@@ -838,6 +852,28 @@ func (a *App) handleCommandWithTrace(addr messenger.Address, cmd any, traceID st
 	default:
 		log.Printf("plugin-automation: unknown command %T for %s", cmd, addr.Key())
 	}
+}
+
+func (a *App) logGroupCommandTargets(addr messenger.Address, cmd any) {
+	if a == nil || a.store == nil || addr.Plugin != PluginID || addr.DeviceID != "group" {
+		return
+	}
+	group, err := a.loadGroupEntity(addr)
+	if err != nil {
+		log.Printf("plugin-automation: group %s command %T target_load_failed=%v", addr.Key(), cmd, err)
+		return
+	}
+	memberKeys, err := a.resolveGroupMemberKeys(group)
+	if err != nil {
+		log.Printf("plugin-automation: group %s command %T target_resolve_failed=%v", addr.Key(), cmd, err)
+		return
+	}
+	targets := make([]string, 0, len(memberKeys))
+	for key := range memberKeys {
+		targets = append(targets, key)
+	}
+	sort.Strings(targets)
+	log.Printf("plugin-automation: group %s command %T fanout_targets=%d targets=%v", addr.Key(), cmd, len(targets), targets)
 }
 
 func (a *App) appendLog(kind, level, message string, addr messenger.Address, cmd any, traceID string, data map[string]any) {

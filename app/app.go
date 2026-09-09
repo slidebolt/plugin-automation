@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -20,9 +22,16 @@ import (
 
 const PluginID = "plugin-automation"
 
+const (
+	groupRGBConsensusThreshold         = 10
+	groupTemperatureConsensusThreshold = 10
+	groupHSConsensusThreshold          = 0.5
+	groupXYConsensusThreshold          = 0.005
+)
+
 // AggregateLightState computes the aggregate state of a group from its
-// member light states: power = any-on, brightness/rgb/temperature =
-// average of on-members.
+// member light states: power = any-on, brightness = average of on-members,
+// color = only when all on-members agree within a small reporting tolerance.
 func AggregateLightState(members []domain.Light) domain.Light {
 	var result domain.Light
 	if len(members) == 0 {
@@ -31,10 +40,7 @@ func AggregateLightState(members []domain.Light) domain.Light {
 
 	var onCount int
 	var totalBrightness int
-	var rgbCount int
-	var totalR, totalG, totalB int
-	var tempCount int
-	var totalTemp int
+	onMembers := make([]domain.Light, 0, len(members))
 
 	for _, m := range members {
 		if !m.Power {
@@ -42,31 +48,150 @@ func AggregateLightState(members []domain.Light) domain.Light {
 		}
 		result.Power = true
 		onCount++
+		onMembers = append(onMembers, m)
 		totalBrightness += m.Brightness
-
-		if m.RGB != nil && len(m.RGB) == 3 {
-			rgbCount++
-			totalR += m.RGB[0]
-			totalG += m.RGB[1]
-			totalB += m.RGB[2]
-		}
-		if m.Temperature > 0 {
-			tempCount++
-			totalTemp += m.Temperature
-		}
 	}
 
 	if onCount > 0 {
 		result.Brightness = totalBrightness / onCount
 	}
-	if rgbCount > 0 {
-		result.RGB = []int{totalR / rgbCount, totalG / rgbCount, totalB / rgbCount}
+
+	if rgb, ok := consensusRGB(onMembers); ok {
+		result.RGB = rgb
+		result.ColorMode = "rgb"
+		return result
 	}
-	if tempCount > 0 {
-		result.Temperature = totalTemp / tempCount
+
+	if hs, ok := consensusHS(onMembers); ok {
+		result.HS = hs
+		result.ColorMode = "hs"
+		return result
+	}
+
+	if xy, ok := consensusXY(onMembers); ok {
+		result.XY = xy
+		result.ColorMode = "xy"
+		return result
+	}
+
+	if temperature, ok := consensusTemperature(onMembers); ok {
+		result.Temperature = temperature
+		result.ColorMode = "color_temp"
 	}
 
 	return result
+}
+
+func consensusRGB(members []domain.Light) ([]int, bool) {
+	if len(members) == 0 {
+		return nil, false
+	}
+	total := []int{0, 0, 0}
+	first := members[0].RGB
+	if len(first) != 3 {
+		return nil, false
+	}
+	for _, member := range members {
+		if len(member.RGB) != 3 {
+			return nil, false
+		}
+		for i := range 3 {
+			if absInt(member.RGB[i]-first[i]) > groupRGBConsensusThreshold {
+				return nil, false
+			}
+			total[i] += member.RGB[i]
+		}
+	}
+	return []int{total[0] / len(members), total[1] / len(members), total[2] / len(members)}, true
+}
+
+func consensusHS(members []domain.Light) ([]float64, bool) {
+	if len(members) == 0 {
+		return nil, false
+	}
+	first := members[0].HS
+	if len(first) != 2 {
+		return nil, false
+	}
+	var totalH, totalS float64
+	for _, member := range members {
+		if len(member.HS) != 2 {
+			return nil, false
+		}
+		if absFloat(member.HS[0]-first[0]) > groupHSConsensusThreshold ||
+			absFloat(member.HS[1]-first[1]) > groupHSConsensusThreshold {
+			return nil, false
+		}
+		totalH += member.HS[0]
+		totalS += member.HS[1]
+	}
+	return []float64{totalH / float64(len(members)), totalS / float64(len(members))}, true
+}
+
+func consensusXY(members []domain.Light) ([]float64, bool) {
+	if len(members) == 0 {
+		return nil, false
+	}
+	first := members[0].XY
+	if len(first) != 2 {
+		return nil, false
+	}
+	var totalX, totalY float64
+	for _, member := range members {
+		if len(member.XY) != 2 {
+			return nil, false
+		}
+		if absFloat(member.XY[0]-first[0]) > groupXYConsensusThreshold ||
+			absFloat(member.XY[1]-first[1]) > groupXYConsensusThreshold {
+			return nil, false
+		}
+		totalX += member.XY[0]
+		totalY += member.XY[1]
+	}
+	return []float64{totalX / float64(len(members)), totalY / float64(len(members))}, true
+}
+
+func consensusTemperature(members []domain.Light) (int, bool) {
+	if len(members) == 0 || members[0].Temperature <= 0 {
+		return 0, false
+	}
+	first := members[0].Temperature
+	var total int
+	for _, member := range members {
+		if member.Temperature <= 0 || absInt(member.Temperature-first) > groupTemperatureConsensusThreshold {
+			return 0, false
+		}
+		total += member.Temperature
+	}
+	return total / len(members), true
+}
+
+func absInt(v int) int {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
+
+func absFloat(v float64) float64 {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
+
+func LightStatesEqual(a, b domain.Light) bool {
+	return a.Power == b.Power &&
+		a.Brightness == b.Brightness &&
+		a.ColorMode == b.ColorMode &&
+		slices.Equal(a.RGB, b.RGB) &&
+		slices.Equal(a.RGBW, b.RGBW) &&
+		slices.Equal(a.RGBWW, b.RGBWW) &&
+		slices.Equal(a.HS, b.HS) &&
+		slices.Equal(a.XY, b.XY) &&
+		a.Temperature == b.Temperature &&
+		a.White == b.White &&
+		a.Effect == b.Effect
 }
 
 type AutomationRule struct {
@@ -351,10 +476,14 @@ func (a *App) discoverGroups() error {
 		// Preserve existing state from storage so rediscovery doesn't
 		// reset state that was set by commands (e.g. power, brightness, rgb).
 		existingKey := domain.EntityKey{Plugin: PluginID, DeviceID: "group", ID: groupID}
+		var existingGroup *domain.Entity
 		if raw, err := a.store.Get(existingKey); err == nil {
 			var existing domain.Entity
-			if err := json.Unmarshal(raw, &existing); err == nil && existing.Type == groupEntity.Type {
-				groupEntity.State = existing.State
+			if err := json.Unmarshal(raw, &existing); err == nil {
+				existingGroup = &existing
+				if existing.Type == groupEntity.Type {
+					groupEntity.State = existing.State
+				}
 			}
 		}
 		// Store control entity keys in labels so they're discoverable
@@ -371,9 +500,11 @@ func (a *App) discoverGroups() error {
 			}
 		}
 
-		if err := a.store.Save(groupEntity); err != nil {
-			log.Printf("plugin-automation: failed to save %s group %s: %v", entityType, groupName, err)
-			continue
+		if existingGroup == nil || !groupEntitySaveEquivalent(*existingGroup, groupEntity) {
+			if err := a.store.Save(groupEntity); err != nil {
+				log.Printf("plugin-automation: failed to save %s group %s: %v", entityType, groupName, err)
+				continue
+			}
 		}
 		// Persist group labels in sidecar, merging with any existing
 		// sidecar labels (e.g. PluginHomeassistant) so we don't clobber
@@ -400,8 +531,10 @@ func (a *App) discoverGroups() error {
 			}
 			profileData["labels"] = mergedLabels
 			rawProfileData, _ := json.Marshal(profileData)
-			if err := a.store.SetProfile(groupEntity, json.RawMessage(rawProfileData)); err != nil {
-				log.Printf("plugin-automation: failed to setprofile %s group %s: %v", entityType, groupName, err)
+			if !storedJSONEqual(a.store, storage.Profile, groupEntity, json.RawMessage(rawProfileData)) {
+				if err := a.store.SetProfile(groupEntity, json.RawMessage(rawProfileData)); err != nil {
+					log.Printf("plugin-automation: failed to setprofile %s group %s: %v", entityType, groupName, err)
+				}
 			}
 		}
 		log.Printf("plugin-automation: %s %s updated with %d members targets=%v labels=%v", entityType, groupName, len(members), targets, groupEntity.Labels)
@@ -540,6 +673,37 @@ func (a *App) handleControlChange(group domain.Entity, on bool, headers messenge
 	}
 }
 
+func groupEntitySaveEquivalent(existing, next domain.Entity) bool {
+	return existing.ID == next.ID &&
+		existing.Plugin == next.Plugin &&
+		existing.DeviceID == next.DeviceID &&
+		existing.Type == next.Type &&
+		existing.Name == next.Name &&
+		reflect.DeepEqual(existing.Commands, next.Commands) &&
+		reflect.DeepEqual(existing.State, next.State) &&
+		string(existing.Target) == string(next.Target)
+}
+
+func storedJSONEqual(store storage.Storage, target storage.StorageTarget, key storage.Keyed, next json.RawMessage) bool {
+	existing, err := store.ReadFile(target, key)
+	if err != nil {
+		return false
+	}
+	return jsonSemanticEqual(existing, next)
+}
+
+func jsonSemanticEqual(a, b json.RawMessage) bool {
+	var av any
+	var bv any
+	if err := json.Unmarshal(a, &av); err != nil {
+		return false
+	}
+	if err := json.Unmarshal(b, &bv); err != nil {
+		return false
+	}
+	return reflect.DeepEqual(av, bv)
+}
+
 // watchGroup sets up a storage.Watch for a light group's target query.
 // On initial setup and on every member add/update/remove, it aggregates
 // member light states into the group entity and saves it.
@@ -630,6 +794,9 @@ func (a *App) aggregateAndSave(group domain.Entity, w *storage.Watcher) {
 	if err := json.Unmarshal(raw, &current); err != nil {
 		return
 	}
+	if existing, ok := current.State.(domain.Light); ok && LightStatesEqual(existing, agg) {
+		return
+	}
 	current.State = agg
 	a.store.Save(current)
 }
@@ -696,8 +863,11 @@ func groupLightCommands(members []positionedEntity) []string {
 	if groupSupportsColorTemperature(members) {
 		cmds = append(cmds, "light_set_color_temp")
 	}
-	if groupSupportsRGB(members) {
-		cmds = append(cmds, "light_set_rgb")
+	if groupSupportsColor(members) {
+		cmds = append(cmds, "light_set_rgb", "light_set_hs")
+	}
+	if groupSupportsXY(members) {
+		cmds = append(cmds, "light_set_xy")
 	}
 	cmds = append(cmds, "script_run", "script_stop_all")
 	return cmds
@@ -710,8 +880,15 @@ func groupSupportsColorTemperature(members []positionedEntity) bool {
 				return true
 			}
 		}
-		if light, ok := member.entity.State.(domain.Light); ok {
-			if light.Temperature > 0 || light.ColorMode == "color_temp" || light.ColorMode == "cold_warm_white" {
+	}
+	return false
+}
+
+func groupSupportsColor(members []positionedEntity) bool {
+	for _, member := range members {
+		for _, cmd := range member.entity.Commands {
+			switch cmd {
+			case "light_set_rgb", "light_set_hs", "light_set_xy", "light_set_rgbw", "light_set_rgbww":
 				return true
 			}
 		}
@@ -719,19 +896,10 @@ func groupSupportsColorTemperature(members []positionedEntity) bool {
 	return false
 }
 
-func groupSupportsRGB(members []positionedEntity) bool {
+func groupSupportsXY(members []positionedEntity) bool {
 	for _, member := range members {
-		light, ok := member.entity.State.(domain.Light)
-		hasStateRGB := ok && (len(light.RGB) == 3 || len(light.RGBW) == 4 || len(light.RGBWW) == 5 || strings.HasPrefix(light.ColorMode, "rgb"))
-		if hasStateRGB {
-			return true
-		}
-		if ok && (light.ColorMode == "color_temp" || light.ColorMode == "cold_warm_white") && light.Temperature > 0 {
-			continue
-		}
 		for _, cmd := range member.entity.Commands {
-			switch cmd {
-			case "light_set_rgb", "light_set_rgbw", "light_set_rgbww":
+			if cmd == "light_set_xy" {
 				return true
 			}
 		}

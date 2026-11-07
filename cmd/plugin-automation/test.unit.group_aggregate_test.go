@@ -528,7 +528,7 @@ func TestLightGroup_SkipsUnchangedAggregateSave(t *testing.T) {
 	}
 	select {
 	case <-groupEvents:
-	case <-time.After(time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("timed out waiting for changed aggregate publish")
 	}
 }

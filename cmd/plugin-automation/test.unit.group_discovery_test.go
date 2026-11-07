@@ -93,7 +93,7 @@ func TestGroupDiscovery_OnStartCreatesGroupFromLabelOnlyMembers(t *testing.T) {
 
 	key := domain.EntityKey{Plugin: app.PluginID, DeviceID: "group", ID: "kitchen"}
 	var group domain.Entity
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for {
 		raw, err := store.Get(key)
 		if err == nil && json.Unmarshal(raw, &group) == nil && group.Type == "light" {

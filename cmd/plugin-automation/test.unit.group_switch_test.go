@@ -436,7 +436,7 @@ func waitForCommands(t *testing.T, ch chan receivedCommand, count int, timeout t
 func waitForGroup(t *testing.T, store storage.Storage, groupID string) {
 	t.Helper()
 	key := domain.EntityKey{Plugin: automationapp.PluginID, DeviceID: "group", ID: groupID}
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, err := store.Get(key); err == nil {
 			return

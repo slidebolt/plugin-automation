@@ -39,3 +39,6 @@ Thumbs.db
 dist/
 build/
 !.env.example
+
+# Built binary
+/cmd/plugin-automation/plugin-automation

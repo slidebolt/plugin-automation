@@ -287,6 +287,7 @@ func (a *App) Hello() contract.HelloResponse {
 		ContractVersion: contract.ContractVersion,
 		Definitions:     definitions,
 		DependsOn:       []string{"messenger", "storage"},
+		Setup:           contract.RequiredSetup("Core"),
 	}
 }
 

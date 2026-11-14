@@ -223,11 +223,7 @@ type ScriptStopAll struct{}
 
 func (ScriptStopAll) ActionName() string { return "script_stop_all" }
 
-type GroupState struct {
-	MemberCount int      `json:"member_count"`
-	Status      string   `json:"status,omitempty"`
-	Control     []string `json:"control,omitempty"`
-}
+type GroupState = domain.Group
 
 type App struct {
 	msg      messenger.Messenger
@@ -263,7 +259,6 @@ type positionedEntity struct {
 }
 
 func init() {
-	domain.Register("group", GroupState{})
 	domain.RegisterCommand("script_run", ScriptRun{})
 	domain.RegisterCommand("script_stop_all", ScriptStopAll{})
 }
@@ -281,10 +276,16 @@ func NewWithLogger(logger logging.Store) *App {
 }
 
 func (a *App) Hello() contract.HelloResponse {
+	definitions := contract.DescribePlugin("Automation", "Builds data-driven groups and aggregate controls over shared domain entities.", "group", "light", "light_strip", "switch")
+	definitions.Commands = []contract.CommandDefinition{
+		contract.DescribeCommand("script_run", "Run script", "Runs a named automation script.", `{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}`),
+		contract.DescribeCommand("script_stop_all", "Stop all scripts", "Stops every active automation script.", `{"type":"object","additionalProperties":false}`),
+	}
 	return contract.HelloResponse{
 		ID:              PluginID,
 		Kind:            contract.KindPlugin,
 		ContractVersion: contract.ContractVersion,
+		Definitions:     definitions,
 		DependsOn:       []string{"messenger", "storage"},
 	}
 }

@@ -309,8 +309,6 @@ func (a *App) OnStart(deps map[string]json.RawMessage) (json.RawMessage, error) 
 		}
 	}
 
-	domain.Register("group", GroupState{})
-
 	a.cmds = messenger.NewCommands(msg, domain.LookupCommand)
 	sub, err := a.cmds.ReceiveMessage(PluginID+".>", a.handleCommandMessage)
 	if err != nil {

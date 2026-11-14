@@ -383,7 +383,7 @@ func (a *App) discoverGroups() error {
 	// bucket that holds every user-defined group (basement, kitchen, …).
 	// Written idempotently on every discovery pass so a fresh install or
 	// a wiped data dir always gets it.
-	groupDevice := domain.Device{ID: "group", Plugin: PluginID, Name: "Automation Groups"}
+	groupDevice := domain.Device{ID: "group", Plugin: PluginID, Name: "Automation Groups", Entities: []domain.Entity{}}
 	if err := a.store.Save(groupDevice); err != nil {
 		return fmt.Errorf("save group device: %w", err)
 	}

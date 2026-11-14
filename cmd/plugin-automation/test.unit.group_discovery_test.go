@@ -91,6 +91,18 @@ func TestGroupDiscovery_OnStartCreatesGroupFromLabelOnlyMembers(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = automationSvc.OnShutdown() })
 
+	rawDevice, err := store.Get(domain.DeviceKey{Plugin: app.PluginID, ID: "group"})
+	if err != nil {
+		t.Fatalf("group device: %v", err)
+	}
+	var groupDevice domain.Device
+	if err := json.Unmarshal(rawDevice, &groupDevice); err != nil {
+		t.Fatalf("decode group device: %v", err)
+	}
+	if groupDevice.Entities == nil {
+		t.Fatal("group device entities must serialize as an empty array")
+	}
+
 	key := domain.EntityKey{Plugin: app.PluginID, DeviceID: "group", ID: "kitchen"}
 	var group domain.Entity
 	deadline := time.Now().Add(15 * time.Second)
